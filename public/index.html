@@ -1,1 +1,74 @@
 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Aurion v1 — Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --bg:#0b0b0f; --panel:#141419; --bubble:#1f2430; --user:#0a84ff; --text:#e8e8f2; --muted:#9aa4b2; }
+    *{ box-sizing:border-box; }
+    body{ margin:0; background:var(--bg); color:var(--text); font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+    header{ padding:16px; text-align:center; background:var(--panel); position:sticky; top:0; z-index:1; }
+    header h1{ margin:0; font-size:18px; letter-spacing:.5px; }
+    #wrap{ max-width:720px; margin:0 auto; padding:12px; }
+    #chat{ height:68vh; overflow:auto; padding:12px; background:var(--panel); border-radius:16px; }
+    .msg{ max-width:75%; padding:10px 12px; margin:10px 0; border-radius:12px; line-height:1.35; white-space:pre-wrap; }
+    .bot{ background:var(--bubble); border:1px solid #2c3242; }
+    .you{ background:var(--user); color:white; margin-left:auto; }
+    #bar{ display:flex; gap:8px; margin-top:12px; }
+    #bar input{ flex:1; padding:12px; border-radius:10px; border:1px solid #2b2f3b; background:#0f1118; color:var(--text); }
+    #bar button{ padding:12px 16px; border:0; border-radius:10px; background:#3b82f6; color:white; font-weight:600; }
+    #hint{ color:var(--muted); font-size:12px; margin-top:8px; text-align:center; }
+  </style>
+</head>
+<body>
+  <header><h1>🔥 Aurion v1 — Chat</h1></header>
+  <div id="wrap">
+    <div id="chat"></div>
+    <div id="bar">
+      <input id="msg" placeholder="Speak to the forge…" />
+      <button id="send">Send</button>
+    </div>
+    <div id="hint">Stored at: server memory (Render Disk if configured). Add a memory via <code>/mem/add</code> later.</div>
+  </div>
+
+  <script>
+    const chat = document.getElementById('chat');
+    const input = document.getElementById('msg');
+    const btn = document.getElementById('send');
+
+    function addBubble(text, cls){
+      const div = document.createElement('div');
+      div.className = 'msg ' + cls;
+      div.textContent = text;
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    async function send(){
+      const text = input.value.trim();
+      if(!text) return;
+      addBubble(text, 'you');
+      input.value = '';
+      try{
+        const res = await fetch('/chat', {
+          method:'POST',
+          headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify({ message: text })
+        });
+        const data = await res.json();
+        addBubble(data.reply || data.message || '…no reply…', 'bot');
+      }catch(e){
+        addBubble('Connection error: ' + (e.message||e), 'bot');
+      }
+    }
+
+    btn.addEventListener('click', send);
+    input.addEventListener('keydown', (e)=>{ if(e.key==='Enter') send(); });
+
+    // opening line
+    addBubble('Aurion online. What shall we forge?', 'bot');
+  </script>
+</body>
+</html>
