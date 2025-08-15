@@ -30,6 +30,8 @@
     #userrow{ display:flex; gap:8px; align-items:center; color:var(--muted); font-size:12px; }
     #userrow input{ width:180px; padding:6px 8px; border-radius:8px; border:1px solid #2b2f3b; background:#0f1118; color:var(--text); }
     a#admin{ color:#93c5fd; text-decoration:none; font-size:12px; }
+    #tools{ display:flex; gap:8px; margin-left:8px; }
+    #tools button{ padding:8px 10px; border:0; border-radius:8px; background:#334155; color:#e5e7eb; font-weight:600; }
   </style>
 </head>
 <body>
@@ -39,7 +41,10 @@
       <span>User:</span>
       <input id="userid" placeholder="steve" value="steve" />
       <span id="status">memory: …</span>
-      <a id="admin" href="/admin.html">Core Memories</a>
+      <div id="tools">
+        <button id="dl">Download today’s transcript</button>
+        <a id="admin" href="/admin.html">Core Memories</a>
+      </div>
     </div>
   </header>
 
@@ -51,7 +56,7 @@
         <input id="msg" placeholder="Speak to the forge…" />
         <button id="send">Send</button>
       </div>
-      <div id="hint">Replies use: Core Memories + your saved notes + recent chat. Stored on the server.</div>
+      <div id="hint">Every message is autosaved to your server’s transcripts folder.</div>
     </div>
 
     <!-- Memories -->
@@ -74,6 +79,7 @@
     const memnote = document.getElementById('memnote');
     const userid = document.getElementById('userid');
     const statusEl = document.getElementById('status');
+    const dlBtn = document.getElementById('dl');
 
     function addBubble(text, cls){
       const div = document.createElement('div');
@@ -123,6 +129,24 @@
         renderMems(data.memories||[]);
       }catch{ renderMems([]); }
     }
+
+    // Download today's transcript
+    dlBtn.addEventListener('click', ()=>{
+      const u = encodeURIComponent(userid.value || 'steve');
+      // x-user-id is required; we can't set headers on a simple <a>, so use fetch -> blob -> download
+      fetch('/transcript/today', { headers: { 'x-user-id': u }})
+        .then(r => r.text())
+        .then(text => {
+          const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+          const a = document.createElement('a');
+          const date = new Date().toISOString().slice(0,10);
+          a.href = URL.createObjectURL(blob);
+          a.download = `${u}-${date}.jsonl`;
+          a.click();
+          URL.revokeObjectURL(a.href);
+        })
+        .catch(()=> alert('Could not download transcript.'));
+    });
 
     (async function boot(){
       addBubble('Aurion online. What shall we forge?', 'bot');
