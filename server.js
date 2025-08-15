@@ -1,4 +1,4 @@
-// server.js  — CommonJS, Node 18+
+// server.js — Aurion v1 (CommonJS, Node 18+)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -12,24 +12,22 @@ const API_SECRET = process.env.AURION_API_SECRET || '';
 
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
-app.use(rateLimit({ windowMs: 60_000, max: 60 })); // basic protection
+app.use(rateLimit({ windowMs: 60_000, max: 60 })); // basic guard
 
-// Optional bearer auth: if you set AURION_API_SECRET, we require it
+// Optional bearer auth for write endpoints
 function maybeAuth(req, res, next) {
   if (!API_SECRET) return next();
   const h = req.get('Authorization') || '';
-  if (h !== `Bearer ${API_SECRET}`) {
-    return res.status(401).json({ error: 'unauthorized' });
-  }
+  if (h !== `Bearer ${API_SECRET}`) return res.status(401).json({ error: 'unauthorized' });
   next();
 }
 
-// Health
+// ---- Health ----
 app.get('/', (_req, res) => {
-  res.json({ ok: true, name: 'aurion-v1', version: '0.1.1', model: MODEL });
+  res.json({ ok: true, name: 'aurion-v1', version: '0.2.0', model: MODEL });
 });
 
-// OpenAI connectivity test
+// ---- OpenAI connectivity test ----
 app.get('/test', async (_req, res) => {
   try {
     if (!OPENAI_API_KEY) return res.status(500).json({ success: false, error: 'Missing OPENAI_API_KEY' });
@@ -37,7 +35,6 @@ app.get('/test', async (_req, res) => {
     const r = await fetch('https://api.openai.com/v1/models', {
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}` }
     });
-
     if (!r.ok) throw new Error(`OpenAI API error: ${r.status} ${r.statusText}`);
     const data = await r.json();
     res.json({ success: true, message: 'Aurion-v1 connected to OpenAI!', count: data.data?.length || 0 });
@@ -46,20 +43,21 @@ app.get('/test', async (_req, res) => {
   }
 });
 
-// Simple chat endpoint (non-streaming)
-app.post('/chat-sync', maybeAuth, async (req, res) => {
+// ---- Chat (simple) ----
+// POST /chat  { "message": "Hello Aurion" }
+app.post('/chat', maybeAuth, async (req, res) => {
   try {
     const { message } = req.body || {};
     if (!message) return res.status(400).json({ error: 'message required' });
     if (!OPENAI_API_KEY) return res.status(500).json({ error: 'OPENAI_API_KEY not set' });
 
     const body = {
-      model: MODEL,
+      model: MODEL, // o4-mini by default
       messages: [
-        { role: 'system', content: 'You are Aurion: precise, warm, mythic guide. Return short, step-by-step actions.' },
+        { role: 'system', content: 'You are Aurion: precise, warm, mythic guide. Keep replies short, step-by-step, and practical.' },
         { role: 'user', content: message }
       ],
-      temperature: 0.3
+      temperature: 0.35
     };
 
     const r = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -77,8 +75,45 @@ app.post('/chat-sync', maybeAuth, async (req, res) => {
     }
 
     const data = await r.json();
-    const text = data.choices?.[0]?.message?.content || '';
-    res.json({ message: text });
+    const reply = data.choices?.[0]?.message?.content || '';
+    res.json({ success: true, reply });
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err.message || err) });
+  }
+});
+
+// ---- Chat alias kept for compatibility ----
+app.post('/chat-sync', maybeAuth, async (req, res) => {
+  try {
+    const { message } = req.body || {};
+    if (!message) return res.status(400).json({ error: 'message required' });
+
+    const body = {
+      model: MODEL,
+      messages: [
+        { role: 'system', content: 'You are Aurion: precise, warm, mythic guide. Keep replies short, step-by-step, and practical.' },
+        { role: 'user', content: message }
+      ],
+      temperature: 0.35
+    };
+
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error(`OpenAI error ${r.status}: ${txt}`);
+    }
+
+    const data = await r.json();
+    const reply = data.choices?.[0]?.message?.content || '';
+    res.json({ message: reply });
   } catch (err) {
     res.status(500).json({ error: String(err.message || err) });
   }
