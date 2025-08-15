@@ -1,13 +1,9 @@
 {
   "name": "aurion-v1-server",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
-    "node": ">=18"
-  },
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
