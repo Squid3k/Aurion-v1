@@ -1,5 +1,5 @@
-// server.js — Aurion v1 with file memory (Render-safe: /tmp storage)
-// CommonJS, Node 18+
+// server.js — Aurion v1 with persistent file memory + built-in web chat
+// CommonJS, Node 18+ (global fetch), Render-ready
 
 require('dotenv').config();
 const fs = require('fs');
@@ -11,19 +11,21 @@ const rateLimit = require('express-rate-limit');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
+
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const MODEL = process.env.OPENAI_MODEL || 'o4-mini';
 const API_SECRET = process.env.AURION_API_SECRET || '';
 
-// ---- Storage paths ----
-// Use /tmp by default (always writable on Render). If DB_PATH is set, use its folder.
+// ---- Storage dir selection ----
+// If DB_PATH is set, use its folder (works great with Render Disk at /var/data).
+// Else if /var/data exists, use it. Else fall back to /tmp (always writable).
 const DATA_DIR = process.env.DB_PATH
   ? path.dirname(process.env.DB_PATH)
-  : '/tmp/aurion-data';
+  : fs.existsSync('/var/data') ? '/var/data' : '/tmp/aurion-data';
+
 const MSG_FILE = path.join(DATA_DIR, 'conversations.jsonl'); // append-only chat log
 const MEM_FILE = path.join(DATA_DIR, 'memories.json');      // small JSON array
 
-// Ensure folders/files exist
 function ensurePaths() {
   try {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -39,6 +41,9 @@ ensurePaths();
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 app.use(rateLimit({ windowMs: 60_000, max: 60 }));
+
+// Static site for the chat UI (served at /)
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Optional bearer auth for write endpoints
 function maybeAuth(req, res, next) {
@@ -89,8 +94,8 @@ async function memoryPreamble(user) {
 }
 
 // ---- Health & test ----
-app.get('/', (_req, res) => {
-  res.json({ ok: true, name: 'aurion-v1', version: '0.3.1', model: MODEL, memory: DATA_DIR });
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, name: 'aurion-v1', version: '0.4.0', model: MODEL, memory_dir: DATA_DIR });
 });
 
 app.get('/test', async (_req, res) => {
@@ -115,13 +120,14 @@ app.post('/mem/add', maybeAuth, async (req, res) => {
   await addMemory(user, note);
   res.json({ ok: true });
 });
+
 app.get('/mem/list', maybeAuth, async (req, res) => {
   const user = getUserId(req);
   const mems = await getMemories(user);
   res.json({ ok: true, count: mems.length, memories: mems.slice(-20).reverse() });
 });
 
-// ---- Chat (uses memories + recent chat) ----
+// ---- OpenAI chat call ----
 async function callOpenAI(messages) {
   const body = { model: MODEL, messages }; // o4-mini: no temperature override
   const r = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -134,6 +140,7 @@ async function callOpenAI(messages) {
   return data.choices?.[0]?.message?.content || '';
 }
 
+// ---- Chat endpoints ----
 app.post('/chat', maybeAuth, async (req, res) => {
   try {
     if (!OPENAI_API_KEY) return res.status(500).json({ error: 'OPENAI_API_KEY not set' });
@@ -161,7 +168,6 @@ app.post('/chat', maybeAuth, async (req, res) => {
   }
 });
 
-// Alias
 app.post('/chat-sync', maybeAuth, async (req, res) => {
   try {
     if (!OPENAI_API_KEY) return res.status(500).json({ error: 'OPENAI_API_KEY not set' });
