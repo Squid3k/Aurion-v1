@@ -1,4 +1,6 @@
-// Aurion v1 — full stack with persistent memory + core memories + web chat (Node 18+, CommonJS)
+// Aurion v1 — autosave transcripts + persistent memory + core memories + web chat
+// Node 18+, CommonJS, Render-ready
+
 require('dotenv').config();
 const fs = require('fs');
 const fsp = require('fs/promises');
@@ -15,35 +17,29 @@ const MODEL = process.env.OPENAI_MODEL || 'o4-mini';
 const API_SECRET = process.env.AURION_API_SECRET || '';
 
 // -------- Storage selection --------
-// Prefer DB_PATH folder (Render Disk: /var/data). Else /var/data if mounted. Else /tmp.
 const DATA_DIR = process.env.DB_PATH
   ? path.dirname(process.env.DB_PATH)
   : (fs.existsSync('/var/data') ? '/var/data' : '/tmp/aurion-data');
 
-const MSG_FILE  = path.join(DATA_DIR, 'conversations.jsonl');     // append-only chat log
-const MEM_FILE  = path.join(DATA_DIR, 'memories.json');           // [{t,user,note}]
-const CORE_FILE = path.join(DATA_DIR, 'core_memories.txt');       // big seed text
+const MSG_FILE  = path.join(DATA_DIR, 'conversations.jsonl'); // global append log
+const MEM_FILE  = path.join(DATA_DIR, 'memories.json');       // [{t,user,note}]
+const CORE_FILE = path.join(DATA_DIR, 'core_memories.txt');   // seed text
+const TX_DIR    = path.join(DATA_DIR, 'transcripts');         // per-user, per-day jsonl
 
 function ensurePaths() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(MSG_FILE)) fs.writeFileSync(MSG_FILE, '');
   if (!fs.existsSync(MEM_FILE)) fs.writeFileSync(MEM_FILE, '[]');
-  // If DATA_DIR/core_memories.txt does not exist, try to copy bundled one, else create empty
+  if (!fs.existsSync(TX_DIR))   fs.mkdirSync(TX_DIR, { recursive: true });
   if (!fs.existsSync(CORE_FILE)) {
     const bundled = path.join(__dirname, 'core_memories.txt');
-    if (fs.existsSync(bundled)) {
-      fs.copyFileSync(bundled, CORE_FILE);
-    } else {
-      fs.writeFileSync(CORE_FILE, '');
-    }
+    fs.writeFileSync(CORE_FILE, fs.existsSync(bundled) ? fs.readFileSync(bundled, 'utf8') : '');
   }
 }
 ensurePaths();
 
-// Load core memories (seed knowledge)
 function loadCore() {
-  try { return fs.readFileSync(CORE_FILE, 'utf8'); } catch { /* fall back */ }
-  try { return fs.readFileSync(path.join(__dirname, 'core_memories.txt'), 'utf8'); } catch { return ''; }
+  try { return fs.readFileSync(CORE_FILE, 'utf8'); } catch { return ''; }
 }
 let CORE_TEXT = loadCore();
 
@@ -51,7 +47,7 @@ let CORE_TEXT = loadCore();
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 app.use(rateLimit({ windowMs: 60_000, max: 60 }));
-app.use(express.static(path.join(__dirname, 'public'))); // serves / (index.html)
+app.use(express.static(path.join(__dirname, 'public'))); // serves the chat UI
 
 function maybeAuth(req, res, next) {
   if (!API_SECRET) return next();
@@ -59,19 +55,14 @@ function maybeAuth(req, res, next) {
   if (h !== `Bearer ${API_SECRET}`) return res.status(401).json({ error: 'unauthorized' });
   next();
 }
-
 const userId = req => (req.get('x-user-id') || 'steve').toString().slice(0, 64) || 'steve';
+const todayStr = () => new Date().toISOString().slice(0,10);
+const safe = s => s.replace(/[^a-z0-9_\-]/gi, '_');
 
 // -------- File helpers --------
-async function loadRecent(user, n = 20) {
-  try {
-    const text = await fsp.readFile(MSG_FILE, 'utf8');
-    const lines = text.trim() ? text.trim().split('\n') : [];
-    return lines.map(l => JSON.parse(l)).filter(m => m.user === user).slice(-n);
-  } catch { return []; }
-}
 async function appendMsg(user, role, content) {
-  await fsp.appendFile(MSG_FILE, JSON.stringify({ t: Date.now(), user, role, content }) + '\n', 'utf8');
+  const rec = { t: Date.now(), user, role, content };
+  await fsp.appendFile(MSG_FILE, JSON.stringify(rec) + '\n', 'utf8');
 }
 async function listMems(user) {
   try {
@@ -88,20 +79,40 @@ async function memPreamble(user) {
   const mems = (await listMems(user)).slice(-4).reverse();
   return mems.length ? mems.map(m => `• ${m.note}`).join('\n') : 'No saved memories yet.';
 }
+async function loadRecent(user, n = 20) {
+  try {
+    const text = await fsp.readFile(MSG_FILE, 'utf8');
+    const lines = text.trim() ? text.trim().split('\n') : [];
+    return lines.map(l => JSON.parse(l)).filter(m => m.user === user).slice(-n);
+  } catch { return []; }
+}
+
+// -------- Transcript helpers (per user/day) --------
+function txPath(user, date = todayStr()) {
+  return path.join(TX_DIR, `${safe(user)}-${date}.jsonl`);
+}
+async function txAppend(user, role, content) {
+  const line = JSON.stringify({ t: Date.now(), role, content }) + '\n';
+  await fsp.appendFile(txPath(user), line, 'utf8');
+}
+async function txRead(user, date = todayStr()) {
+  try { return await fsp.readFile(txPath(user, date), 'utf8'); } catch { return ''; }
+}
+async function txList(user) {
+  try {
+    const files = await fsp.readdir(TX_DIR);
+    return files.filter(f => f.startsWith(safe(user) + '-')).sort();
+  } catch { return []; }
+}
 
 // -------- Health & OpenAI test --------
 app.get('/health', (_req, res) => {
-  res.json({
-    ok: true, name: 'aurion-v1', version: '1.1.0', model: MODEL,
-    memory_dir: DATA_DIR, core_bytes: CORE_TEXT.length
-  });
+  res.json({ ok: true, name: 'aurion-v1', version: '1.2.0', model: MODEL, memory_dir: DATA_DIR, core_bytes: CORE_TEXT.length });
 });
 app.get('/test', async (_req, res) => {
   try {
     if (!OPENAI_API_KEY) return res.status(500).json({ success: false, error: 'Missing OPENAI_API_KEY' });
-    const r = await fetch('https://api.openai.com/v1/models', {
-      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` }
-    });
+    const r = await fetch('https://api.openai.com/v1/models', { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` }});
     if (!r.ok) throw new Error(`OpenAI ${r.status}`);
     const data = await r.json();
     res.json({ success: true, message: 'Aurion connected!', count: data.data?.length || 0 });
@@ -123,9 +134,7 @@ app.get('/mem/list', maybeAuth, async (req, res) => {
 });
 
 // -------- Core memories (admin) --------
-app.get('/admin/core', maybeAuth, (_req, res) => {
-  res.json({ ok: true, text: CORE_TEXT });
-});
+app.get('/admin/core', maybeAuth, (_req, res) => res.json({ ok: true, text: CORE_TEXT }));
 app.post('/admin/set-core', maybeAuth, async (req, res) => {
   const { text } = req.body || {};
   if (typeof text !== 'string') return res.status(400).json({ error: 'text required' });
@@ -136,6 +145,30 @@ app.post('/admin/set-core', maybeAuth, async (req, res) => {
 app.post('/admin/refresh-core', maybeAuth, (_req, res) => {
   CORE_TEXT = loadCore();
   res.json({ ok: true, bytes: CORE_TEXT.length });
+});
+
+// -------- Transcript endpoints --------
+app.get('/transcript/list', maybeAuth, async (req, res) => {
+  const u = userId(req);
+  const files = await txList(u);
+  res.json({ ok: true, files });
+});
+app.get('/transcript/today', maybeAuth, async (req, res) => {
+  const u = userId(req);
+  const text = await txRead(u);
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.send(text || '');
+});
+app.get('/transcript/download', maybeAuth, async (req, res) => {
+  const u = userId(req);
+  const date = (req.query.date || todayStr()).toString();
+  const file = txPath(u, date);
+  try {
+    await fsp.access(file);
+    res.download(file, `${safe(u)}-${date}.jsonl`);
+  } catch {
+    res.status(404).json({ error: 'not found' });
+  }
 });
 
 // -------- OpenAI chat --------
@@ -151,7 +184,7 @@ async function chatOpenAI(messages) {
   return data.choices?.[0]?.message?.content || '';
 }
 
-// -------- Chat endpoints --------
+// -------- Chat endpoint (autosaves transcripts) --------
 app.post('/chat', maybeAuth, async (req, res) => {
   try {
     if (!OPENAI_API_KEY) return res.status(500).json({ error: 'OPENAI_API_KEY not set' });
@@ -159,6 +192,11 @@ app.post('/chat', maybeAuth, async (req, res) => {
     const { message } = req.body || {};
     if (!message) return res.status(400).json({ error: 'message required' });
 
+    // Save user line immediately (global + transcript)
+    await appendMsg(u, 'user', message);
+    await txAppend(u, 'user', message);
+
+    // Build context
     const recent = await loadRecent(u, 12);
     const memText = await memPreamble(u);
     const messages = [
@@ -169,14 +207,19 @@ app.post('/chat', maybeAuth, async (req, res) => {
       { role: 'user', content: message }
     ];
 
-    await appendMsg(u, 'user', message);
     const reply = await chatOpenAI(messages);
+
+    // Save assistant line (global + transcript)
     await appendMsg(u, 'assistant', reply);
+    await txAppend(u, 'assistant', reply);
+
     res.json({ success: true, reply });
-  } catch (e) { res.status(500).json({ success: false, error: String(e.message || e) }); }
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e.message || e) });
+  }
 });
 
-// Boot
+// -------- Boot --------
 app.listen(PORT, () => {
-  console.log(`Aurion v1 listening on ${PORT}; memory dir: ${DATA_DIR}; core bytes: ${CORE_TEXT.length}`);
+  console.log(`Aurion v1 listening on ${PORT}; memory dir: ${DATA_DIR}; transcripts: ${TX_DIR}`);
 });
