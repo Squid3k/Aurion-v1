@@ -1,4 +1,5 @@
-// server.js — Aurion v1 with simple file memory (Node 18+, CommonJS)
+// server.js — Aurion v1 with file memory (Render-safe: /tmp storage)
+// CommonJS, Node 18+
 
 require('dotenv').config();
 const fs = require('fs');
@@ -13,23 +14,33 @@ const PORT = process.env.PORT || 10000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const MODEL = process.env.OPENAI_MODEL || 'o4-mini';
 const API_SECRET = process.env.AURION_API_SECRET || '';
-const DATA_DIR = path.dirname(process.env.DB_PATH || '/var/data/aurion.sqlite'); // we’ll use the folder
-const MSG_FILE = path.join(DATA_DIR, 'conversations.jsonl'); // append-only
+
+// ---- Storage paths ----
+// Use /tmp by default (always writable on Render). If DB_PATH is set, use its folder.
+const DATA_DIR = process.env.DB_PATH
+  ? path.dirname(process.env.DB_PATH)
+  : '/tmp/aurion-data';
+const MSG_FILE = path.join(DATA_DIR, 'conversations.jsonl'); // append-only chat log
 const MEM_FILE = path.join(DATA_DIR, 'memories.json');      // small JSON array
 
-// ---------- bootstrap storage ----------
+// Ensure folders/files exist
 function ensurePaths() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(MSG_FILE)) fs.writeFileSync(MSG_FILE, '');
-  if (!fs.existsSync(MEM_FILE)) fs.writeFileSync(MEM_FILE, '[]');
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    if (!fs.existsSync(MSG_FILE)) fs.writeFileSync(MSG_FILE, '');
+    if (!fs.existsSync(MEM_FILE)) fs.writeFileSync(MEM_FILE, '[]');
+  } catch (e) {
+    console.error('Init storage failed:', e);
+  }
 }
 ensurePaths();
 
-// ---------- helpers ----------
+// ---- Middleware ----
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 app.use(rateLimit({ windowMs: 60_000, max: 60 }));
 
+// Optional bearer auth for write endpoints
 function maybeAuth(req, res, next) {
   if (!API_SECRET) return next();
   const h = req.get('Authorization') || '';
@@ -37,13 +48,13 @@ function maybeAuth(req, res, next) {
   next();
 }
 
-// who is speaking? allow header "x-user-id", default "steve"
+// Identify user (header x-user-id), default "steve"
 function getUserId(req) {
   const v = (req.get('x-user-id') || 'steve').toString().slice(0, 64);
   return v || 'steve';
 }
 
-// read last N messages for a user (user,assistant pairs)
+// ---- File-memory helpers ----
 async function loadRecentMessages(user, limit = 20) {
   try {
     const text = await fsp.readFile(MSG_FILE, 'utf8');
@@ -54,14 +65,10 @@ async function loadRecentMessages(user, limit = 20) {
     return [];
   }
 }
-
-// append one message to the log
 async function saveMessage(user, role, content) {
   const rec = { t: Date.now(), user, role, content };
   await fsp.appendFile(MSG_FILE, JSON.stringify(rec) + '\n', 'utf8');
 }
-
-// memories: array of {t, user, note}
 async function getMemories(user) {
   try {
     const arr = JSON.parse(await fsp.readFile(MEM_FILE, 'utf8'));
@@ -75,17 +82,15 @@ async function addMemory(user, note) {
   arr.push({ t: Date.now(), user, note });
   await fsp.writeFile(MEM_FILE, JSON.stringify(arr, null, 2), 'utf8');
 }
-
-// craft a short memory preamble (top 4 notes newest first)
 async function memoryPreamble(user) {
   const mems = (await getMemories(user)).slice(-4).reverse();
   if (mems.length === 0) return 'No saved memories yet.';
   return mems.map(m => `• ${m.note}`).join('\n');
 }
 
-// ---------- routes ----------
+// ---- Health & test ----
 app.get('/', (_req, res) => {
-  res.json({ ok: true, name: 'aurion-v1', version: '0.3.0', model: MODEL, memory: 'file-jsonl' });
+  res.json({ ok: true, name: 'aurion-v1', version: '0.3.1', model: MODEL, memory: DATA_DIR });
 });
 
 app.get('/test', async (_req, res) => {
@@ -102,7 +107,7 @@ app.get('/test', async (_req, res) => {
   }
 });
 
-// --- memory endpoints ---
+// ---- Memory endpoints ----
 app.post('/mem/add', maybeAuth, async (req, res) => {
   const user = getUserId(req);
   const { note } = req.body || {};
@@ -110,16 +115,15 @@ app.post('/mem/add', maybeAuth, async (req, res) => {
   await addMemory(user, note);
   res.json({ ok: true });
 });
-
 app.get('/mem/list', maybeAuth, async (req, res) => {
   const user = getUserId(req);
   const mems = await getMemories(user);
   res.json({ ok: true, count: mems.length, memories: mems.slice(-20).reverse() });
 });
 
-// --- chat (uses memories + recent chat) ---
+// ---- Chat (uses memories + recent chat) ----
 async function callOpenAI(messages) {
-  const body = { model: MODEL, messages };
+  const body = { model: MODEL, messages }; // o4-mini: no temperature override
   const r = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
@@ -130,7 +134,6 @@ async function callOpenAI(messages) {
   return data.choices?.[0]?.message?.content || '';
 }
 
-// POST /chat { message }  (optional header: x-user-id)
 app.post('/chat', maybeAuth, async (req, res) => {
   try {
     if (!OPENAI_API_KEY) return res.status(500).json({ error: 'OPENAI_API_KEY not set' });
@@ -138,25 +141,18 @@ app.post('/chat', maybeAuth, async (req, res) => {
     const { message } = req.body || {};
     if (!message) return res.status(400).json({ error: 'message required' });
 
-    // Load context
-    const recent = await loadRecentMessages(user, 12); // last ~6 turns
+    const recent = await loadRecentMessages(user, 12);
     const memText = await memoryPreamble(user);
 
-    // Build prompt
     const messages = [
-      { role: 'system', content: 'You are Aurion: precise, warm, mythic guide. Keep replies short, step-by-step, and practical. Use the "memories" context if helpful.' },
+      { role: 'system', content: 'You are Aurion: precise, warm, mythic guide. Keep replies short, step-by-step, and practical. Use the memories context if helpful.' },
       { role: 'system', content: `Memories for ${user}:\n${memText}` },
       ...recent.map(r => ({ role: r.role, content: r.content })),
       { role: 'user', content: message }
     ];
 
-    // Save user line
     await saveMessage(user, 'user', message);
-
-    // Ask model
     const reply = await callOpenAI(messages);
-
-    // Save assistant line
     await saveMessage(user, 'assistant', reply);
 
     res.json({ success: true, reply });
@@ -165,7 +161,7 @@ app.post('/chat', maybeAuth, async (req, res) => {
   }
 });
 
-// alias for earlier steps
+// Alias
 app.post('/chat-sync', maybeAuth, async (req, res) => {
   try {
     if (!OPENAI_API_KEY) return res.status(500).json({ error: 'OPENAI_API_KEY not set' });
@@ -192,7 +188,7 @@ app.post('/chat-sync', maybeAuth, async (req, res) => {
   }
 });
 
-// ---------- boot ----------
+// ---- Boot ----
 app.listen(PORT, () => {
-  console.log(`Aurion-v1 listening on ${PORT} with memory at ${DATA_DIR}`);
+  console.log(`Aurion-v1 listening on ${PORT}; memory dir: ${DATA_DIR}`);
 });
