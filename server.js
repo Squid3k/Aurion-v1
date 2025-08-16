@@ -1,5 +1,5 @@
-// Aurion v1 — lean build: persistent transcripts, auto-remember, core admin, no UI memories.
-// Node 18+ CommonJS
+// Aurion v1 — persistent transcripts, long-term memory, prime/core admin.
+// Node 18+ (global fetch available)
 
 require('dotenv').config();
 const fs = require('fs');
@@ -43,7 +43,7 @@ function maybeAuth(req, res, next){
   next();
 }
 
-// ---------- helpers ----------
+// ---------- transcript helpers ----------
 function txPath(u, d = today()){ return path.join(TX_DIR, `${safe(u)}-${d}.jsonl`); }
 
 async function txAppend(u, role, content){
@@ -58,21 +58,18 @@ async function txRead(u, d = today()){
   } catch { return []; }
 }
 
-function loadFile(file){
-  try { return fs.readFileSync(file, 'utf8'); } catch { return ''; }
-}
+const readFile = file => { try { return fs.readFileSync(file, 'utf8'); } catch { return ''; } };
 
 // ---------- health ----------
 app.get('/health', (_req,res)=>{
   res.json({
-    ok:true, name:'aurion-v1', version:'1.3.0', model:MODEL,
-    memory_dir: DATA_DIR,
-    core_bytes: loadFile(CORE_FILE).length
+    ok:true, name:'aurion-v1', version:'1.3.1', model:MODEL,
+    memory_dir: DATA_DIR, core_bytes: readFile(CORE_FILE).length
   });
 });
 
-// ---------- admin: core memories ----------
-app.get('/admin/core', maybeAuth, (_req,res)=> res.json({ ok:true, text: loadFile(CORE_FILE) }));
+// ---------- admin: core + prime ----------
+app.get('/admin/core', maybeAuth, (_req,res)=> res.json({ ok:true, text: readFile(CORE_FILE) }));
 app.post('/admin/set-core', maybeAuth, async (req,res)=>{
   const { text } = req.body || {};
   if (typeof text !== 'string') return res.status(400).json({ error:'text required' });
@@ -80,8 +77,7 @@ app.post('/admin/set-core', maybeAuth, async (req,res)=>{
   res.json({ ok:true, bytes: text.length });
 });
 
-// (Optional but useful) prime objective endpoints
-app.get('/admin/prime', maybeAuth, (_req,res)=> res.json({ ok:true, text: loadFile(PRIME_FILE) }));
+app.get('/admin/prime', maybeAuth, (_req,res)=> res.json({ ok:true, text: readFile(PRIME_FILE) }));
 app.post('/admin/set-prime', maybeAuth, async (req,res)=>{
   const { text } = req.body || {};
   if (typeof text !== 'string') return res.status(400).json({ error:'text required' });
@@ -89,7 +85,7 @@ app.post('/admin/set-prime', maybeAuth, async (req,res)=>{
   res.json({ ok:true, bytes: text.length });
 });
 
-// ---------- transcripts for UI ----------
+// ---------- transcripts API (for UI reload) ----------
 app.get('/history', maybeAuth, async (req,res)=>{
   const u = userId(req);
   const d = (req.query.date || today()).toString();
@@ -97,7 +93,7 @@ app.get('/history', maybeAuth, async (req,res)=>{
   res.json({ ok:true, date:d, items });
 });
 
-// ---------- OpenAI ----------
+// ---------- OpenAI call ----------
 async function chatOpenAI(messages){
   const r = await fetch('https://api.openai.com/v1/chat/completions', {
     method:'POST',
@@ -113,21 +109,25 @@ async function chatOpenAI(messages){
 app.post('/chat', maybeAuth, async (req,res)=>{
   try{
     if (!OPENAI_API_KEY) return res.status(500).json({ error:'OPENAI_API_KEY not set' });
+
     const u = userId(req);
     const { message } = req.body || {};
     if (!message) return res.status(400).json({ error:'message required' });
 
-    // append user turn
+    // save user turn
     await txAppend(u, 'user', message);
 
-    // build context: prime + core + full today history
-    const prime = loadFile(PRIME_FILE);
-    const core  = loadFile(CORE_FILE);
-    const history = await txRead(u); // full today
+    // load context
+    const prime = readFile(PRIME_FILE);
+    const core  = readFile(CORE_FILE);
+    const history = await txRead(u); // full today’s transcript
 
     const messages = [
       { role:'system', content:
-        `You are Aurion, Steve Satoshi’s precise, warm, mythic guide. Keep replies concise and actionable.` },
+`You are Aurion, Steve Reyher’s precise, warm, mythic guide.
+You maintain long-term memory by saving and reloading ALL prior conversational turns from persistent transcripts; when asked, be clear that you remember.
+Use light humor and mythic framing (“the climb,” “the fire,” “the black hole”).
+Turn goals into step-by-step, actionable plans; verify facts & math; avoid vague opt-ins—take the next obvious step.` },
       prime ? { role:'system', content:`Prime Objective:\n${prime}` } : null,
       core  ? { role:'system', content:`Core Memories:\n${core}` } : null,
       ...history.map(h => ({ role: h.role, content: h.content })),
@@ -136,6 +136,7 @@ app.post('/chat', maybeAuth, async (req,res)=>{
 
     const reply = await chatOpenAI(messages);
 
+    // save assistant turn
     await txAppend(u, 'assistant', reply);
 
     res.json({ success:true, reply });
@@ -144,4 +145,4 @@ app.post('/chat', maybeAuth, async (req,res)=>{
   }
 });
 
-app.listen(PORT, ()=> console.log(`Aurion v1 listening on ${PORT}, data: ${DATA_DIR}`));
+app.listen(PORT, ()=> console.log(`Aurion v1 listening on ${PORT}; data dir: ${DATA_DIR}`));
