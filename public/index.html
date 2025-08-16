@@ -5,22 +5,35 @@
   <title>Aurion v1 — Chat</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root{ --bg:#0b0b0f; --panel:#141419; --bubble:#1f2430; --user:#0a84ff; --text:#e8e8f2; --muted:#9aa4b2; --accent:#3b82f6; }
-    *{ box-sizing:border-box } body{ margin:0; background:var(--bg); color:var(--text); font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif }
-    header{ padding:14px 16px; background:var(--panel); position:sticky; top:0; z-index:2; display:flex; gap:10px; align-items:center; justify-content:space-between }
+    :root{
+      --bg:#0b0b0f; --panel:#141419; --bubble:#1f2430; --user:#0a84ff;
+      --text:#e8e8f2; --muted:#9aa4b2; --accent:#3b82f6;
+    }
+    *{ box-sizing:border-box }
+    body{ margin:0; background:var(--bg); color:var(--text);
+          font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif; }
+    header{ padding:14px 16px; background:var(--panel); position:sticky; top:0; z-index:2;
+            display:flex; gap:10px; align-items:center; justify-content:space-between }
     header h1{ margin:0; font-size:18px }
     #tools{ display:flex; gap:8px; align-items:center; color:var(--muted); font-size:12px }
-    #tools input{ width:160px; padding:6px 8px; border-radius:8px; border:1px solid #2b2f3b; background:#0f1118; color:var(--text) }
-    #tools a, #tools button{ background:#334155; color:#e5e7eb; border:0; border-radius:8px; padding:8px 10px; text-decoration:none; font-weight:600 }
-    #chatwrap{ max-width:900px; margin:0 auto; padding:12px }
+    #tools input{ width:160px; padding:6px 8px; border-radius:8px; border:1px solid #2b2f3b;
+                  background:#0f1118; color:var(--text) }
+    #wrap{ max-width:900px; margin:0 auto; padding:12px }
     #chat{ background:var(--panel); border-radius:16px; padding:12px; height:70vh; overflow:auto }
-    .msg{ max-width:75%; padding:10px 12px; margin:10px 0; border-radius:12px; white-space:pre-wrap; line-height:1.35 }
+    .msg{ max-width:78%; padding:10px 12px; margin:10px 0; border-radius:12px; white-space:pre-wrap; line-height:1.35 }
     .bot{ background:var(--bubble); border:1px solid #2c3242 }
     .you{ background:var(--user); color:white; margin-left:auto }
+    .name{ font-weight:700 }
     #bar{ display:flex; gap:8px; margin-top:12px }
     #bar input{ flex:1; padding:12px; border-radius:10px; border:1px solid #2b2f3b; background:#0f1118; color:var(--text) }
     #bar button{ padding:12px 16px; border:0; border-radius:10px; background:var(--accent); color:white; font-weight:700 }
     #hint{ color:var(--muted); font-size:12px; margin-top:8px; text-align:center }
+    /* typing dots */
+    .dots{ display:inline-block; min-width:24px }
+    .dots span{ animation: blink 1.2s infinite both; }
+    .dots span:nth-child(2){ animation-delay:.15s }
+    .dots span:nth-child(3){ animation-delay:.3s }
+    @keyframes blink{ 0%,80%,100%{ opacity:.2 } 40%{ opacity:1 } }
   </style>
 </head>
 <body>
@@ -28,77 +41,83 @@
     <h1>🔥 Aurion v1 — Chat</h1>
     <div id="tools">
       <span>User:</span><input id="userid" value="steve" />
-      <button id="dl">Download today</button>
-      <a href="/admin.html">Core Memories</a>
     </div>
   </header>
 
-  <div id="chatwrap">
+  <div id="wrap">
     <div id="chat"></div>
+
     <div id="bar">
-      <input id="msg" placeholder="Speak to the forge…" />
+      <input id="msg" placeholder="Speak to the forge…" autocomplete="off" />
       <button id="send">Send</button>
     </div>
-    <div id="hint">Chat history persists. Every message is autosaved to your server’s transcripts folder.</div>
+
+    <div id="hint">Aurion replies are labeled clearly; waiting indicator shows while he thinks.</div>
   </div>
 
   <script>
     const chat = document.getElementById('chat');
-    const msg = document.getElementById('msg');
-    const sendBtn = document.getElementById('send');
-    const userEl = document.getElementById('userid');
-    const dlBtn = document.getElementById('dl');
+    const msg  = document.getElementById('msg');
+    const send = document.getElementById('send');
+    const user = document.getElementById('userid');
 
-    function bubble(text, cls){
-      const d = document.createElement('div');
-      d.className = 'msg ' + cls;
-      d.textContent = text;
-      chat.appendChild(d);
+    // add a chat bubble; if id is provided, replace that bubble later
+    function bubble(role, text, id=null){
+      let div = id ? document.getElementById(id) : null;
+      if (!div){
+        div = document.createElement('div');
+        if (id) div.id = id;
+        div.className = 'msg ' + (role === 'user' ? 'you' : 'bot');
+        chat.appendChild(div);
+      }
+      const label = role === 'user' ? '<span class="name">You:</span> ' : '<span class="name">Aurion:</span> ';
+      div.innerHTML = label + text;
       chat.scrollTop = chat.scrollHeight;
     }
 
-    async function loadHistory(){
-      const u = userEl.value || 'steve';
-      const r = await fetch('/history', { headers: { 'x-user-id': u }});
-      const data = await r.json();
-      chat.innerHTML = '';
-      if (data.items?.length){
-        for (const m of data.items) bubble(m.content, m.role === 'user' ? 'you' : 'bot');
-      } else {
-        bubble('Aurion online. What shall we forge?', 'bot');
+    function dotsHTML(){
+      return `<span class="dots"><span>•</span><span>•</span><span>•</span></span>`;
+    }
+
+    async function sendMsg(){
+      const text = msg.value.trim();
+      if (!text) return;
+      const uid = (user.value || 'steve').trim();
+
+      // show your message
+      bubble('user', text);
+      msg.value = '';
+      msg.focus();
+
+      // show waiting dots placeholder
+      const waitId = 'wait-' + Date.now();
+      bubble('assistant', dotsHTML(), waitId);
+
+      // disable send during request
+      send.disabled = true;
+
+      try{
+        const res = await fetch('/chat', {
+          method:'POST',
+          headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify({ message: text, u: uid, core: true })
+        });
+        const data = await res.json();
+        const reply = data.reply || '(no reply)';
+        bubble('assistant', reply, waitId); // replace dots with reply
+      }catch(e){
+        bubble('assistant', 'Aurion: (signal lost — try again)', waitId);
+      }finally{
+        send.disabled = false;
       }
     }
 
-    async function send(){
-      const text = msg.value.trim(); if (!text) return;
-      bubble(text, 'you'); msg.value='';
-      const u = userEl.value || 'steve';
-      const r = await fetch('/chat', {
-        method:'POST',
-        headers:{ 'Content-Type':'application/json', 'x-user-id': u },
-        body: JSON.stringify({ message: text })
-      });
-      const data = await r.json();
-      bubble(data.reply || data.message || '…', 'bot');
-    }
+    send.addEventListener('click', sendMsg);
+    msg.addEventListener('keydown', e => { if (e.key === 'Enter') sendMsg(); });
 
-    sendBtn.addEventListener('click', send);
-    msg.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
-
-    dlBtn.addEventListener('click', async ()=>{
-      const u = userEl.value || 'steve';
-      const r = await fetch('/history', { headers: { 'x-user-id': u }});
-      const data = await r.json();
-      const text = (data.items || []).map(x => JSON.stringify(x)).join('\n');
-      const b = new Blob([text], { type: 'text/plain;charset=utf-8' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(b);
-      a.download = `${u}-${new Date().toISOString().slice(0,10)}.jsonl`;
-      a.click();
-      URL.revokeObjectURL(a.href);
-    });
-
-    loadHistory();
+    // friendly boot line
+    bubble('assistant', 'Aurion: Online. The climb awaits. What shall we forge?');
   </script>
 </body>
 </html>
+```0
