@@ -1,13 +1,20 @@
 {
-  "name": "aurion-v1-server",
-  "version": "1.1.0",
+  "name": "aurion-v1",
+  "version": "1.0.0",
+  "description": "Aurion v1 — personal AI guide for Steve Reyher",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
-  "engines": { "node": ">=18" },
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "express-rate-limit": "^7.2.0"
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.2",
+    "dotenv": "^16.4.1",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": ">=18.x"
   }
 }
