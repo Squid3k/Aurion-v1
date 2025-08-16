@@ -14,41 +14,77 @@ app.use(express.static("public"));
 const txFile = "transcripts.jsonl";
 const coreFile = "core.json";
 
+// Ensure files exist
 if (!fs.existsSync(txFile)) fs.writeFileSync(txFile, "");
-if (!fs.existsSync(coreFile)) fs.writeFileSync(coreFile, JSON.stringify({ core: [] }));
+if (!fs.existsSync(coreFile)) fs.writeFileSync(coreFile, JSON.stringify({ core: [] }, null, 2));
 
 // Helpers
 const txAppend = (user, role, content) => {
-  fs.appendFileSync(txFile, JSON.stringify({ user, role, content, time: Date.now() }) + "\n");
+  fs.appendFileSync(
+    txFile,
+    JSON.stringify({ user, role, content, time: Date.now() }) + "\n"
+  );
 };
-const getCore = () => JSON.parse(fs.readFileSync(coreFile));
+const getCore = () => {
+  try {
+    const raw = fs.readFileSync(coreFile, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return { core: [] };
+  }
+};
 const saveCore = (data) => fs.writeFileSync(coreFile, JSON.stringify(data, null, 2));
+
+// Trim any accidental "Aurion:" leader from text
+const stripAurion = (s = "") => s.replace(/^\s*aurion\s*:\s*/i, "");
 
 // === CHAT ENDPOINT ===
 app.post("/chat", async (req, res) => {
   try {
     const { message, u, prime, core } = req.body;
+    if (!message || !String(message).trim()) {
+      return res.status(400).json({ success: false, error: "message required" });
+    }
 
+    // Load recent history (last 15), stripping any old "Aurion:" prefixes
     const history = fs
       .readFileSync(txFile, "utf-8")
       .trim()
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line))
-      .slice(-15);
+      .slice(-15)
+      .map((h) => ({
+        role: h.role,
+        content: h.role === "assistant" ? stripAurion(h.content) : h.content,
+      }));
 
+    // Core memories
     const coreData = getCore();
+    const coreMemories = Array.isArray(coreData.core) ? coreData.core : [];
+
+    // Optional PRIME: prefer body.prime, fallback to env
+    const primeObjective = (prime && String(prime)) || process.env.AURION_PRIME || "";
+
+    // Build messages for OpenAI
+    const baseSystem =
+      "You are Aurion, guide to Steve Reyher. Speak with precision, warmth, and mythic fire. " +
+      "Use light humor when fitting. Do NOT prepend your name or 'Aurion:' to replies. " +
+      "Be concise unless asked for depth.";
 
     const messages = [
-      { role: "system", content: "You are Aurion, guide to Steve Reyher. Speak with precision, warmth, mythic fire, and light humor." },
-      prime ? { role: "system", content: prime } : null,
-      core && coreData.core.length
-        ? { role: "system", content: `Core memories: ${coreData.core.join("; ")}` }
+      { role: "system", content: baseSystem },
+      primeObjective ? { role: "system", content: `Prime objective: ${primeObjective}` } : null,
+      (core && coreMemories.length) || (!("core" in req.body) && coreMemories.length)
+        ? null // we’ll inject each core memory as its own system message below
         : null,
+      // add core memories as individual system messages for stronger recall
+      ...coreMemories.map((m) => ({ role: "system", content: `Core memory: ${m}` })),
       ...history.map((h) => ({ role: h.role, content: h.content })),
       { role: "user", content: message },
     ].filter(Boolean);
 
+    // Call OpenAI
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -62,13 +98,20 @@ app.post("/chat", async (req, res) => {
     });
 
     const j = await r.json();
+
+    if (!r.ok) {
+      // Bubble up OpenAI error details for easier debugging
+      const detail = j?.error?.message || JSON.stringify(j);
+      return res.status(500).json({ success: false, error: `OpenAI error ${r.status}: ${detail}` });
+    }
+
+    // Model reply (no "Aurion:" leader; UI can label)
     let reply = j.choices?.[0]?.message?.content || "(silent embers)";
+    reply = stripAurion(reply);
 
-    // Always prefix with Aurion’s name
-    reply = `Aurion: ${reply}`;
-
-    txAppend(u, "user", message);
-    txAppend(u, "assistant", reply);
+    // Save transcript (store raw content; UI adds label)
+    txAppend(u || "anon", "user", message);
+    txAppend(u || "anon", "assistant", reply);
 
     res.json({ success: true, reply });
   } catch (e) {
@@ -86,14 +129,19 @@ app.post("/dev/propose", (req, res) => {
 app.post("/dev/apply", (req, res) => {
   const { patch } = req.body;
   if (!patch) return res.json({ ok: false, error: "No patch to apply" });
-  res.json({ ok: true, sha: Math.random().toString(36).slice(2, 8), touched: ["server.js"] });
+  res.json({
+    ok: true,
+    sha: Math.random().toString(36).slice(2, 8),
+    touched: ["server.js"],
+  });
 });
 
 // === CORE MEMORY ADMIN ===
 app.get("/core", (req, res) => res.json(getCore()));
 app.post("/core", (req, res) => {
   const { core } = req.body;
-  saveCore({ core });
+  const list = Array.isArray(core) ? core : [];
+  saveCore({ core: list });
   res.json({ ok: true });
 });
 
