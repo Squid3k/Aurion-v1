@@ -5,157 +5,100 @@
   <title>Aurion v1 — Chat</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root { --bg:#0b0b0f; --panel:#141419; --bubble:#1f2430; --user:#0a84ff; --text:#e8e8f2; --muted:#9aa4b2; --accent:#3b82f6; --ok:#16a34a; }
-    *{ box-sizing:border-box; } body{ margin:0; background:var(--bg); color:var(--text); font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
-    header{ padding:16px; background:var(--panel); position:sticky; top:0; z-index:2; display:flex; justify-content:space-between; align-items:center; gap:8px; }
-    header h1{ margin:0; font-size:18px; }
-    #wrap{ max-width:980px; margin:0 auto; padding:12px; display:grid; grid-template-columns: 1fr 320px; gap:12px; }
-    @media (max-width: 900px){ #wrap{ grid-template-columns: 1fr; } #mem{ order:-1; } }
-    #chat{ height:68vh; overflow:auto; padding:12px; background:var(--panel); border-radius:16px; }
-    .msg{ max-width:75%; padding:10px 12px; margin:10px 0; border-radius:12px; line-height:1.35; white-space:pre-wrap; }
-    .bot{ background:var(--bubble); border:1px solid #2c3242; }
-    .you{ background:var(--user); color:white; margin-left:auto; }
-    #bar{ display:flex; gap:8px; margin-top:12px; }
-    #bar input{ flex:1; padding:12px; border-radius:10px; border:1px solid #2b2f3b; background:#0f1118; color:var(--text); }
-    #bar button{ padding:12px 16px; border:0; border-radius:10px; background:var(--accent); color:white; font-weight:600; }
-    #hint{ color:var(--muted); font-size:12px; margin-top:8px; text-align:center; }
-    #mem{ background:var(--panel); border-radius:16px; padding:12px; height:68vh; display:flex; flex-direction:column; }
-    #mem h2{ margin:0 0 8px 0; font-size:16px; }
-    #memlist{ flex:1; overflow:auto; border:1px solid #2b2f3b; border-radius:10px; padding:8px; background:#0f1118; }
-    .note{ padding:8px; border-bottom:1px solid #222736; color:#d8d8e6; }
-    .note small{ color:var(--muted); display:block; margin-top:4px; }
-    #memform{ display:flex; gap:6px; margin-top:8px; }
-    #memform input{ flex:1; padding:10px; border-radius:10px; border:1px solid #2b2f3b; background:#0f1118; color:var(--text); }
-    #memform button{ padding:10px 12px; border:0; border-radius:10px; background:var(--ok); color:white; font-weight:600; }
-    #userrow{ display:flex; gap:8px; align-items:center; color:var(--muted); font-size:12px; }
-    #userrow input{ width:180px; padding:6px 8px; border-radius:8px; border:1px solid #2b2f3b; background:#0f1118; color:var(--text); }
-    a#admin{ color:#93c5fd; text-decoration:none; font-size:12px; }
-    #tools{ display:flex; gap:8px; margin-left:8px; }
-    #tools button{ padding:8px 10px; border:0; border-radius:8px; background:#334155; color:#e5e7eb; font-weight:600; }
+    :root{ --bg:#0b0b0f; --panel:#141419; --bubble:#1f2430; --user:#0a84ff; --text:#e8e8f2; --muted:#9aa4b2; --accent:#3b82f6; }
+    *{ box-sizing:border-box } body{ margin:0; background:var(--bg); color:var(--text); font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif }
+    header{ padding:14px 16px; background:var(--panel); position:sticky; top:0; z-index:2; display:flex; gap:10px; align-items:center; justify-content:space-between }
+    header h1{ margin:0; font-size:18px }
+    #tools{ display:flex; gap:8px; align-items:center; color:var(--muted); font-size:12px }
+    #tools input{ width:160px; padding:6px 8px; border-radius:8px; border:1px solid #2b2f3b; background:#0f1118; color:var(--text) }
+    #tools a, #tools button{ background:#334155; color:#e5e7eb; border:0; border-radius:8px; padding:8px 10px; text-decoration:none; font-weight:600 }
+    #chatwrap{ max-width:900px; margin:0 auto; padding:12px }
+    #chat{ background:var(--panel); border-radius:16px; padding:12px; height:70vh; overflow:auto }
+    .msg{ max-width:75%; padding:10px 12px; margin:10px 0; border-radius:12px; white-space:pre-wrap; line-height:1.35 }
+    .bot{ background:var(--bubble); border:1px solid #2c3242 }
+    .you{ background:var(--user); color:white; margin-left:auto }
+    #bar{ display:flex; gap:8px; margin-top:12px }
+    #bar input{ flex:1; padding:12px; border-radius:10px; border:1px solid #2b2f3b; background:#0f1118; color:var(--text) }
+    #bar button{ padding:12px 16px; border:0; border-radius:10px; background:var(--accent); color:white; font-weight:700 }
+    #hint{ color:var(--muted); font-size:12px; margin-top:8px; text-align:center }
   </style>
 </head>
 <body>
   <header>
     <h1>🔥 Aurion v1 — Chat</h1>
-    <div id="userrow">
-      <span>User:</span>
-      <input id="userid" placeholder="steve" value="steve" />
-      <span id="status">memory: …</span>
-      <div id="tools">
-        <button id="dl">Download today’s transcript</button>
-        <a id="admin" href="/admin.html">Core Memories</a>
-      </div>
+    <div id="tools">
+      <span>User:</span><input id="userid" value="steve" />
+      <button id="dl">Download today</button>
+      <a href="/admin.html">Core Memories</a>
     </div>
   </header>
 
-  <div id="wrap">
-    <!-- Chat -->
-    <div>
-      <div id="chat"></div>
-      <div id="bar">
-        <input id="msg" placeholder="Speak to the forge…" />
-        <button id="send">Send</button>
-      </div>
-      <div id="hint">Every message is autosaved to your server’s transcripts folder.</div>
+  <div id="chatwrap">
+    <div id="chat"></div>
+    <div id="bar">
+      <input id="msg" placeholder="Speak to the forge…" />
+      <button id="send">Send</button>
     </div>
-
-    <!-- Memories -->
-    <aside id="mem">
-      <h2>🧠 Memories</h2>
-      <div id="memlist"></div>
-      <form id="memform">
-        <input id="memnote" placeholder="Add a new memory…" />
-        <button type="submit">Save</button>
-      </form>
-    </aside>
+    <div id="hint">Chat history persists. Every message is autosaved to your server’s transcripts folder.</div>
   </div>
 
   <script>
     const chat = document.getElementById('chat');
-    const input = document.getElementById('msg');
-    const btn = document.getElementById('send');
-    const memlist = document.getElementById('memlist');
-    const memform = document.getElementById('memform');
-    const memnote = document.getElementById('memnote');
-    const userid = document.getElementById('userid');
-    const statusEl = document.getElementById('status');
+    const msg = document.getElementById('msg');
+    const sendBtn = document.getElementById('send');
+    const userEl = document.getElementById('userid');
     const dlBtn = document.getElementById('dl');
 
-    function addBubble(text, cls){
-      const div = document.createElement('div');
-      div.className = 'msg ' + cls;
-      div.textContent = text;
-      chat.appendChild(div);
+    function bubble(text, cls){
+      const d = document.createElement('div');
+      d.className = 'msg ' + cls;
+      d.textContent = text;
+      chat.appendChild(d);
       chat.scrollTop = chat.scrollHeight;
     }
 
+    async function loadHistory(){
+      const u = userEl.value || 'steve';
+      const r = await fetch('/history', { headers: { 'x-user-id': u }});
+      const data = await r.json();
+      chat.innerHTML = '';
+      if (data.items?.length){
+        for (const m of data.items) bubble(m.content, m.role === 'user' ? 'you' : 'bot');
+      } else {
+        bubble('Aurion online. What shall we forge?', 'bot');
+      }
+    }
+
     async function send(){
-      const text = input.value.trim();
-      if(!text) return;
-      addBubble(text, 'you');
-      input.value = '';
-      try{
-        const res = await fetch('/chat', {
-          method:'POST',
-          headers:{ 'Content-Type':'application/json', 'x-user-id': userid.value || 'steve' },
-          body: JSON.stringify({ message: text })
-        });
-        const data = await res.json();
-        addBubble(data.reply || data.message || '…no reply…', 'bot');
-      }catch(e){
-        addBubble('Connection error: ' + (e.message||e), 'bot');
-      }
-      await loadMemories();
+      const text = msg.value.trim(); if (!text) return;
+      bubble(text, 'you'); msg.value='';
+      const u = userEl.value || 'steve';
+      const r = await fetch('/chat', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json', 'x-user-id': u },
+        body: JSON.stringify({ message: text })
+      });
+      const data = await r.json();
+      bubble(data.reply || data.message || '…', 'bot');
     }
 
-    btn.addEventListener('click', send);
-    input.addEventListener('keydown', (e)=>{ if(e.key==='Enter') send(); });
+    sendBtn.addEventListener('click', send);
+    msg.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 
-    function renderMems(items){
-      memlist.innerHTML = '';
-      if(!items || !items.length){ memlist.innerHTML = '<div class="note" style="color:#9aa4b2">No memories yet.</div>'; return; }
-      for(const m of items){
-        const d = document.createElement('div');
-        d.className = 'note';
-        const when = new Date(m.t||Date.now()).toLocaleString();
-        d.innerHTML = `${m.note}<small>${when}</small>`;
-        memlist.appendChild(d);
-      }
-    }
-    async function loadMemories(){
-      try{
-        const r = await fetch('/mem/list', { headers: { 'x-user-id': userid.value || 'steve' }});
-        const data = await r.json();
-        renderMems(data.memories||[]);
-      }catch{ renderMems([]); }
-    }
-
-    // Download today's transcript
-    dlBtn.addEventListener('click', ()=>{
-      const u = encodeURIComponent(userid.value || 'steve');
-      // x-user-id is required; we can't set headers on a simple <a>, so use fetch -> blob -> download
-      fetch('/transcript/today', { headers: { 'x-user-id': u }})
-        .then(r => r.text())
-        .then(text => {
-          const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-          const a = document.createElement('a');
-          const date = new Date().toISOString().slice(0,10);
-          a.href = URL.createObjectURL(blob);
-          a.download = `${u}-${date}.jsonl`;
-          a.click();
-          URL.revokeObjectURL(a.href);
-        })
-        .catch(()=> alert('Could not download transcript.'));
+    dlBtn.addEventListener('click', async ()=>{
+      const u = userEl.value || 'steve';
+      const r = await fetch('/history', { headers: { 'x-user-id': u }});
+      const data = await r.json();
+      const text = (data.items || []).map(x => JSON.stringify(x)).join('\n');
+      const b = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b);
+      a.download = `${u}-${new Date().toISOString().slice(0,10)}.jsonl`;
+      a.click();
+      URL.revokeObjectURL(a.href);
     });
 
-    (async function boot(){
-      addBubble('Aurion online. What shall we forge?', 'bot');
-      try{
-        const h = await fetch('/health'); const info = await h.json();
-        statusEl.textContent = `memory: ${info.memory_dir || 'unknown'} | core: ${info.core_bytes||0}b`;
-      }catch{ statusEl.textContent = 'memory: ?'; }
-      await loadMemories();
-    })();
+    loadHistory();
   </script>
 </body>
 </html>
