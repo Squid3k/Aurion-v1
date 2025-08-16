@@ -1,47 +1,114 @@
- <!DOCTYPE html>
+<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8" />
   <title>Aurion Developer Console</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0b0c12;color:#e8ecf1;padding:20px}
+    h1,h2{margin:10px 0}
+    textarea,input,button{font:inherit}
+    textarea{width:100%;min-height:180px;background:#111522;color:#dfe6ee;border:1px solid #2a3348;border-radius:10px;padding:12px}
+    input[type=text]{width:100%;background:#111522;color:#dfe6ee;border:1px solid #2a3348;border-radius:10px;padding:10px}
+    button{background:#3b82f6;border:none;color:white;padding:10px 14px;border-radius:10px;cursor:pointer}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    .row{display:grid;gap:12px}
+    .two{grid-template-columns:1fr 1fr}
+    .card{background:#0f1423;border:1px solid #22304a;border-radius:14px;padding:14px;margin:14px 0}
+    pre{white-space:pre-wrap;background:#0f1423;border:1px dashed #2a3348;padding:10px;border-radius:10px}
+    .small{opacity:.8;font-size:.9em}
+    label{display:block;margin-bottom:6px}
+  </style>
 </head>
-<body style="font-family: sans-serif; background: #111; color: #eee;">
+<body>
   <h1>🔥 Aurion Developer Console</h1>
-  <p>Stage and update files directly from your browser.</p>
+  <p class="small">Stage changes, auto-backup to a GitHub branch, and open a PR — safely.</p>
 
-  <hr>
-  <h2>Paste & Stage File</h2>
-  <p>Paste full file contents here and stage directly (phone friendly).</p>
-  <form id="pasteForm">
-    <label for="path">Target Path:</label>
-    <input type="text" id="path" value="server.js" style="width: 300px;" />
-    <br><br>
-    <textarea id="content" rows="15" cols="80" placeholder="Paste file contents here..."></textarea>
-    <br><br>
-    <button type="submit">Stage File</button>
-  </form>
+  <div class="card">
+    <h2>1) Paste & Stage Files</h2>
+    <div class="row">
+      <label>Commit Message:
+        <input id="msg" type="text" placeholder="Describe this change clearly" />
+      </label>
+      <label>Target Path (e.g. <code>server.js</code> or <code>public/index.html</code>):
+        <input id="path" type="text" placeholder="server.js" />
+      </label>
+      <label>File Contents:</label>
+      <textarea id="contents" placeholder="// paste full file content here"></textarea>
+      <button id="stage">Stage Patch</button>
+    </div>
+    <p id="stageStatus" class="small"></p>
+  </div>
 
-  <script>
-  document.getElementById("pasteForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const path = document.getElementById("path").value;
-    const content = document.getElementById("content").value;
-    if (!content.trim()) {
-      alert("Paste some content first.");
-      return;
-    }
+  <div class="card">
+    <h2>2) Apply (Auto-backup + Pull Request)</h2>
+    <button id="apply">Apply Staged Patch</button>
+    <p id="applyStatus" class="small"></p>
+  </div>
 
-    const res = await fetch("/dev/stage", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path, content })
-    });
-    const j = await res.json();
-    if (j.ok) {
-      alert("Staged: " + path + " (" + j.bytes + " bytes)");
-    } else {
-      alert("Error: " + j.error);
-    }
+  <div class="card">
+    <h2>Core Memory Editor</h2>
+    <div class="row two">
+      <div>
+        <p class="small">One memory per line (kept across restarts):</p>
+        <textarea id="coreBox"></textarea>
+        <button id="saveCore">Save Core</button>
+      </div>
+      <div>
+        <p class="small">Current core.json:</p>
+        <pre id="coreView">(loading...)</pre>
+      </div>
+    </div>
+    <p class="small">File lives at <code>core.json</code>.</p>
+  </div>
+
+<script>
+const $ = (id)=>document.getElementById(id);
+let staged = null;
+
+$("stage").onclick = async () => {
+  const path = $("path").value.trim();
+  const contents = $("contents").value;
+  const message = $("msg").value.trim() || "Aurion dev patch";
+  if (!path || !contents) { $("stageStatus").textContent = "Path and contents required."; return; }
+
+  const r = await fetch("/dev/propose", {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ message, files:[{ path, content: contents }] })
   });
-  </script>
+  const j = await r.json();
+  if (!j.ok) { $("stageStatus").textContent = "Error: " + j.error; return; }
+  staged = j.patch;
+  $("stageStatus").textContent = "Staged. Ready to apply.";
+};
+
+$("apply").onclick = async () => {
+  $("apply").disabled = true;
+  $("applyStatus").textContent = "Applying (creating backup branch + PR)...";
+  const r = await fetch("/dev/apply", { method:"POST" });
+  const j = await r.json();
+  $("apply").disabled = false;
+  if (!j.ok) { $("applyStatus").textContent = "Error: " + j.error; return; }
+  $("applyStatus").innerHTML = `✅ Branch <b>${j.branch}</b> created. PR #${j.pr.number}: <a href="${j.pr.url}" target="_blank" rel="noreferrer">${j.pr.url}</a>`;
+  staged = null;
+};
+
+// Core memory load/save
+async function loadCore(){
+  const r = await fetch("/core");
+  const j = await r.json();
+  $("coreView").textContent = JSON.stringify(j, null, 2);
+  $("coreBox").value = (j.core||[]).join("\n");
+}
+$("saveCore").onclick = async () => {
+  const lines = $("coreBox").value.split("\n").map(s=>s.trim()).filter(Boolean);
+  const r = await fetch("/core", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ core: lines })});
+  const j = await r.json();
+  if (!j.ok) alert("Error: " + j.error);
+  await loadCore();
+};
+loadCore();
+</script>
 </body>
 </html>
