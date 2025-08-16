@@ -1,66 +1,57 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Aurion v1 — Core Memories Admin</title>
+  <meta charset="UTF-8" />
+  <title>Aurion v1 — Core Memories</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body{ margin:0; background:#0b0b0f; color:#e8e8f2; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
-    header{ padding:16px; background:#141419; position:sticky; top:0; z-index:1; }
-    main{ max-width:900px; margin:0 auto; padding:16px; }
-    textarea{ width:100%; height:60vh; padding:12px; background:#0f1118; color:#e8e8f2; border:1px solid #2b2f3b; border-radius:10px; }
-    .row{ display:flex; gap:8px; margin-top:12px; align-items:center; }
-    input[type=text]{ padding:8px; background:#0f1118; color:#e8e8f2; border:1px solid #2b2f3b; border-radius:8px; }
-    button{ padding:10px 14px; border:0; border-radius:10px; background:#3b82f6; color:white; font-weight:600; }
-    small{ color:#9aa4b2; }
-    a{ color:#93c5fd; }
+    body{ margin:0; background:#0b0b0f; color:#e8e8f2; font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif }
+    header{ padding:14px 16px; background:#141419; display:flex; justify-content:space-between; align-items:center }
+    a{ color:#93c5fd; text-decoration:none }
+    main{ max-width:900px; margin:16px auto; padding:0 12px }
+    textarea{ width:100%; min-height:360px; padding:12px; border-radius:10px; border:1px solid #2b2f3b; background:#0f1118; color:#e8e8f2 }
+    button{ margin-top:10px; padding:10px 14px; border:0; border-radius:10px; background:#3b82f6; color:#fff; font-weight:700 }
+    #auth{ width:320px; padding:8px; border-radius:8px; border:1px solid #2b2f3b; background:#0f1118; color:#e8e8f2 }
   </style>
 </head>
 <body>
-  <header><h2 style="margin:0">🔥 Aurion v1 — Core Memories</h2></header>
+  <header>
+    <div>🔥 Aurion v1 — Core Memories</div>
+    <a href="/">← Back to chat</a>
+  </header>
   <main>
-    <div class="row">
-      <button id="load">Load current</button>
-      <button id="save">Save</button>
-      <button id="refresh">Reload from disk</button>
-      <input id="secret" type="text" placeholder="Authorization secret (if set)" style="flex:1">
-    </div>
-    <p><small>Tip: If you configured <code>AURION_API_SECRET</code>, put it here so only you can edit.</small></p>
-    <textarea id="core" placeholder="Paste your core memories here…"></textarea>
-    <p><a href="/">← Back to chat</a></p>
+    <p>Optional <b>Authorization secret</b> (only if you set <code>AURION_API_SECRET</code>):</p>
+    <input id="auth" placeholder="Bearer secret…" />
+    <p>Core Memories:</p>
+    <textarea id="core"></textarea><br/>
+    <button id="load">Load current</button>
+    <button id="save">Save</button>
   </main>
 
   <script>
-    const coreEl = document.getElementById('core');
-    const secretEl = document.getElementById('secret');
+    const core = document.getElementById('core');
+    const auth = document.getElementById('auth');
 
     function hdrs(){
       const h = { 'Content-Type':'application/json' };
-      const s = secretEl.value.trim();
-      if (s) h['Authorization'] = 'Bearer ' + s;
+      if (auth.value.trim()) h['Authorization'] = `Bearer ${auth.value.trim()}`;
       return h;
     }
 
     document.getElementById('load').onclick = async ()=>{
       const r = await fetch('/admin/core', { headers: hdrs() });
-      const data = await r.json();
-      if (!data.ok) return alert('Load failed: ' + (data.error||''));
-      coreEl.value = data.text || '';
+      const data = await r.json(); core.value = data.text || '';
+      alert('Loaded.');
     };
     document.getElementById('save').onclick = async ()=>{
       const r = await fetch('/admin/set-core', {
-        method:'POST', headers: hdrs(), body: JSON.stringify({ text: coreEl.value })
+        method:'POST', headers: hdrs(), body: JSON.stringify({ text: core.value })
       });
-      const data = await r.json();
-      if (!data.ok) return alert('Save failed: ' + (data.error||''));
-      alert('Saved (' + data.bytes + ' bytes).');
+      const d = await r.json(); alert(d.ok ? `Saved (${d.bytes} bytes).` : 'Failed.');
     };
-    document.getElementById('refresh').onclick = async ()=>{
-      const r = await fetch('/admin/refresh-core', { method:'POST', headers: hdrs() });
-      const data = await r.json();
-      if (!data.ok) return alert('Refresh failed: ' + (data.error||''));
-      alert('Reloaded (' + data.bytes + ' bytes).');
-    };
+
+    // auto-load once on open
+    document.getElementById('load').click();
   </script>
 </body>
 </html>
