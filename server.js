@@ -1,171 +1,135 @@
-import express from 'express';
-import fetch from 'node-fetch';
-import fs from 'fs';
-import path from 'path';
-import bodyParser from 'body-parser';
-import cors from 'cors';
+import fs from "fs";
+import path from "path";
+import express from "express";
+import cors from "cors";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Serve static files from the public directory
-app.use(express.static('public'));
-app.use(bodyParser.json());
-app.use(cors());
+// ---- storage (works locally; on Render set a Disk or DATA_DIR) ----
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "aurion-data");
+const TX_FILE   = path.join(DATA_DIR, "transcripts.jsonl");
+const CORE_FILE = path.join(DATA_DIR, "core.json");
+const BK_DIR    = path.join(DATA_DIR, "backups");
+const PT_DIR    = path.join(DATA_DIR, "patches");
 
-// Data directories and files
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'aurion-data');
-const TX_FILE = path.join(DATA_DIR, 'transcripts.jsonl');
-const CORE_FILE = path.join(DATA_DIR, 'core.json');
-const BACKUP_DIR = path.join(DATA_DIR, 'backups');
-const PATCH_DIR = path.join(DATA_DIR, 'patches');
-
-// Ensure directories exist
-fs.mkdirSync(DATA_DIR, { recursive: true });
-fs.mkdirSync(BACKUP_DIR, { recursive: true });
-fs.mkdirSync(PATCH_DIR, { recursive: true });
-if (!fs.existsSync(TX_FILE)) fs.writeFileSync(TX_FILE, '');
+for (const p of [DATA_DIR, BK_DIR, PT_DIR]) fs.mkdirSync(p, { recursive: true });
+if (!fs.existsSync(TX_FILE)) fs.writeFileSync(TX_FILE, "");
 if (!fs.existsSync(CORE_FILE)) fs.writeFileSync(CORE_FILE, JSON.stringify({ core: [] }, null, 2));
 
-// Utility functions
-function loadCore() {
-  return JSON.parse(fs.readFileSync(CORE_FILE, 'utf-8'));
-}
+// ---- app middleware ----
+app.use(cors());
+app.use(express.json({ limit: "1mb" }));
+app.use(express.static(path.join(__dirname, "public")));
 
-function saveCore(data) {
-  fs.writeFileSync(CORE_FILE, JSON.stringify(data, null, 2));
-}
+// ---- helpers ----
+const readCore = () => JSON.parse(fs.readFileSync(CORE_FILE, "utf8"));
+const saveCore = (coreArr) => fs.writeFileSync(CORE_FILE, JSON.stringify({ core: coreArr }, null, 2));
 
 function appendTx(user, role, content) {
-  const entry = { user, role, content, time: Date.now() };
-  fs.appendFileSync(TX_FILE, JSON.stringify(entry) + '\n');
+  fs.appendFileSync(TX_FILE, JSON.stringify({ user, role, content, time: Date.now() }) + "\n");
 }
 
-function getHistory(user, limit = 15) {
-  const lines = fs.readFileSync(TX_FILE, 'utf-8')
-    .trim().split('\n')
-    .filter(Boolean)
-    .map(l => {
-      try { return JSON.parse(l); } catch { return null; }
-    })
-    .filter(Boolean)
-    .filter(e => e.user === user)
-    .slice(-limit);
-  return lines.map(e => ({ role: e.role, content: e.content }));
+function historyFor(user, limit = 20) {
+  const lines = fs.readFileSync(TX_FILE, "utf8").trim().split("\n").filter(Boolean);
+  const parsed = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  return parsed.filter(x => x.user === user).slice(-limit).map(x => ({ role: x.role, content: x.content }));
 }
 
-// Chat endpoint
-app.post('/chat', async (req, res) => {
+// ---- endpoints ----
+app.get("/health", (_, res) => res.json({ ok: true }));
+
+// chat
+app.post("/chat", async (req, res) => {
   try {
-    const { message, u = 'default', prime = '', core = false } = req.body;
-    if (!message) {
-      return res.status(400).json({ error: 'No message provided' });
-    }
+    const { message, u = "default", prime = "", core = true } = req.body || {};
+    if (!message) return res.status(400).json({ error: "missing message" });
 
-    const history = getHistory(u);
-    const messages = [];
+    const msgs = [
+      { role: "system", content: "You are Aurion, a friendly mythic guide. Be precise, warm, lightly humorous. Never repeat your name. If your reply does not already start with 'Aurion:', add 'Aurion: ' once." }
+    ];
 
-    // Base system prompt
-    messages.push({
-      role: 'system',
-      content: 'You are Aurion, a friendly and mythic guide. Speak with precision, warmth, light humor, and a touch of legend.'
-    });
+    if (prime) msgs.push({ role: "system", content: prime });
 
-    // Optional prime prompt
-    if (prime) {
-      messages.push({ role: 'system', content: prime });
-    }
-
-    // Optional core memories
     if (core) {
-      const coreData = loadCore();
-      if (coreData.core && coreData.core.length) {
-        messages.push({ role: 'system', content: `Core memories: ${coreData.core.join('; ')}` });
-      }
+      const c = readCore()?.core ?? [];
+      if (c.length) msgs.push({ role: "system", content: `Core memories: ${c.join("; ")}` });
     }
 
-    // Conversation history and new user message
-    messages.push(...history);
-    messages.push({ role: 'user', content: message });
+    msgs.push(...historyFor(u));
+    msgs.push({ role: "user", content: message });
 
-    // Call OpenAI
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
+    const key = process.env.OPENAI_API_KEY;
+    if (!key) return res.status(500).json({ error: "OPENAI_API_KEY not set" });
+
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
       headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+        "Authorization": `Bearer ${key}`,
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || 'gpt-4o',
-        messages
+        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        messages: msgs
       })
     });
-    const data = await response.json();
-    let reply = data.choices?.[0]?.message?.content?.trim() || '(silent embers)';
 
-    // Ensure single "Aurion:" prefix
-    if (!/^Aurion:\s*/i.test(reply)) {
-      reply = `Aurion: ${reply}`;
-    }
+    const j = await r.json();
+    let reply = j?.choices?.[0]?.message?.content?.trim() || "(silent embers)";
 
-    appendTx(u, 'user', message);
-    appendTx(u, 'assistant', reply);
+    // enforce single prefix
+    if (!/^Aurion:\s*/i.test(reply)) reply = `Aurion: ${reply}`;
+    reply = reply.replace(/^Aurion:\s*Aurion:\s*/i, "Aurion: ");
+
+    appendTx(u, "user", message);
+    appendTx(u, "assistant", reply);
 
     res.json({ reply });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message || String(error) });
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
   }
 });
 
-// Core memory endpoints
-app.get('/core', (req, res) => {
-  res.json(loadCore());
-});
-app.post('/core', (req, res) => {
-  const { core } = req.body;
-  if (!Array.isArray(core)) {
-    return res.status(400).json({ error: 'core must be an array of strings' });
-  }
-  saveCore({ core });
+// core memory admin
+app.get("/core", (_, res) => res.json(readCore()));
+app.post("/core", (req, res) => {
+  const { core } = req.body || {};
+  if (!Array.isArray(core)) return res.status(400).json({ error: "core must be an array of strings" });
+  saveCore(core);
   res.json({ ok: true });
 });
 
-// Propose patch endpoint (simple validation)
-app.post('/dev/propose', (req, res) => {
-  const { patch } = req.body;
-  if (!patch) {
-    return res.status(400).json({ ok: false, error: 'No patch provided' });
-  }
-  res.json({ ok: true, patch });
+// propose/apply patch (backup first)
+app.post("/dev/propose", (req, res) => {
+  const { patch } = req.body || {};
+  if (!patch || typeof patch !== "string") return res.json({ ok: false, error: "no patch" });
+  res.json({ ok: true });
 });
 
-// Apply patch endpoint with backup
-app.post('/dev/apply', (req, res) => {
-  const { patch, target = 'server.js' } = req.body;
+app.post("/dev/apply", (req, res) => {
   try {
-    if (!patch) {
-      return res.status(400).json({ ok: false, error: 'No patch provided' });
-    }
-    const targetPath = path.join(process.cwd(), target);
-    if (!fs.existsSync(targetPath)) {
-      return res.status(404).json({ ok: false, error: `Target file ${target} not found` });
-    }
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const backupPath = path.join(BACKUP_DIR, `${timestamp}_${target}`);
-    fs.copyFileSync(targetPath, backupPath);
+    const { patch, target = "server.js" } = req.body || {};
+    if (!patch) return res.json({ ok: false, error: "no patch" });
 
-    const patchFile = path.join(PATCH_DIR, `${timestamp}.patch`);
+    const targetPath = path.join(__dirname, target);
+    if (!fs.existsSync(targetPath)) return res.json({ ok: false, error: `target not found: ${target}` });
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backup = path.join(BK_DIR, `${stamp}_${path.basename(target)}`);
+    fs.copyFileSync(targetPath, backup);
+
+    const patchFile = path.join(PT_DIR, `${stamp}.patch.txt`);
     fs.writeFileSync(patchFile, patch);
 
-    // Write the patch content directly as the new file contents
-    fs.writeFileSync(targetPath, patch);
-    res.json({ ok: true, backup: path.basename(backupPath), patch: path.basename(patchFile) });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: error.message });
+    fs.writeFileSync(targetPath, patch); // replace file with new contents
+    res.json({ ok: true, backup: path.basename(backup), patch: path.basename(patchFile) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Aurion v1 listening on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Aurion v1 listening on ${PORT}`));
