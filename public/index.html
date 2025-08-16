@@ -1,107 +1,233 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<title>Aurion v1 — Chat</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<style>
-  :root { color-scheme: dark; }
-  body { margin:0; background:#0b0d17; color:#eaeef5; font-family: system-ui, sans-serif; }
-  header { padding:14px 16px; font-weight:700; font-size:18px; border-bottom:1px solid #1e2230; }
-  #wrap { max-width:860px; margin:0 auto; }
-  #log { height: calc(100vh - 216px); overflow:auto; padding:16px; }
-  .row { margin:8px 0; padding:12px 14px; border-radius:12px; white-space:pre-wrap; }
-  .me  { background:#1f2632; text-align:right; }
-  .bot { background:#151a24; }
-  #bar { padding:12px 16px; border-top:1px solid #1e2230; display:grid; gap:10px; }
-  #msg { width:100%; min-height:64px; max-height:240px; resize:vertical; padding:10px 12px; border-radius:10px; border:1px solid #334; background:#1f2632; color:#fff; font-size:16px; }
-  #actions { display:flex; gap:10px; align-items:center; }
-  button { background:#ff8c00; color:#fff; border:0; border-radius:10px; padding:10px 16px; font-size:16px; }
-  button:disabled { opacity:.55 }
-  #thinking { font-style:italic; color:#8aa; min-height:1em; }
-  label { font-size:14px; opacity:.8 }
-</style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>🔥 Aurion v1 — Chat</title>
+  <style>
+    :root{
+      --bg:#0b0f15; --panel:#0f1520; --bubble-me:#174173; --bubble-bot:#0f1b2d;
+      --text:#e6edf3; --muted:#93a4b7; --accent:#66b2ff; --ok:#41d167; --warn:#ffb454;
+      --ring:#1f2a44; --btn:#183558; --btn-hover:#1c406a;
+    }
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif}
+    header{display:flex;align-items:center;gap:.5rem;padding:14px 16px;border-bottom:1px solid var(--ring);position:sticky;top:0;background:linear-gradient(to bottom,var(--bg),#0b0f15cc)}
+    header h1{margin:0;font-size:18px;font-weight:700}
+    .spacer{flex:1}
+    .pill{display:flex;align-items:center;gap:.5rem;background:var(--panel);border:1px solid var(--ring);padding:6px 10px;border-radius:999px}
+    .pill input{background:transparent;border:0;color:var(--text);outline:none;width:120px}
+    .btn{background:var(--btn);border:1px solid var(--ring);color:var(--text);padding:8px 12px;border-radius:10px;cursor:pointer}
+    .btn:hover{background:var(--btn-hover)}
+    .btn:disabled{opacity:.6;cursor:not-allowed}
+    .ghost{background:transparent;border:1px solid var(--ring)}
+    .wrap{max-width:900px;margin:0 auto;padding:10px 14px}
+    #log{display:flex;flex-direction:column;gap:10px;padding:8px 0;min-height:58vh}
+    .row{display:flex}
+    .me{justify-content:flex-end}
+    .bot{justify-content:flex-start}
+    .bubble{max-width:82%;padding:12px 14px;border-radius:16px}
+    .me .bubble{background:var(--bubble-me)}
+    .bot .bubble{background:var(--bubble-bot)}
+    .label{font-weight:700;margin-right:6px}
+    .muted{color:var(--muted);font-size:12px}
+    .composer{position:sticky;bottom:0;background:linear-gradient(to top,var(--bg),#0b0f1500 50%);padding:10px 0 14px;border-top:1px solid var(--ring)}
+    .composer .box{display:flex;gap:10px;align-items:flex-end}
+    textarea{flex:1;min-height:56px;max-height:240px;resize:vertical;background:var(--panel);color:var(--text);border:1px solid var(--ring);border-radius:14px;padding:12px}
+    .hint{margin-top:6px;color:var(--muted);font-size:12px;text-align:center}
+    /* typing dots */
+    .dots{display:inline-block;min-width:28px}
+    .dot{display:inline-block;width:6px;height:6px;margin:0 2px;background:#9bb6d1;border-radius:50%;animation:fade 1.2s infinite}
+    .dot:nth-child(2){animation-delay:.2s}.dot:nth-child(3){animation-delay:.4s}
+    @keyframes fade{0%,80%,100%{opacity:.25}40%{opacity:1}}
+    /* modal */
+    .modal{position:fixed;inset:0;display:none;align-items:flex-end;justify-content:center}
+    .modal.open{display:flex}
+    .scrim{position:absolute;inset:0;background:#0008}
+    .sheet{position:relative;width:min(880px,96vw);max-height:88vh;overflow:auto;background:var(--panel);border:1px solid var(--ring);box-shadow:0 8px 40px #0008;border-radius:16px;margin:20px;padding:16px}
+    .sheet h2{margin:0 0 10px}
+    .rowline{display:flex;gap:8px;margin:6px 0}
+    .rowline input{flex:1;background:#0b1422;border:1px solid var(--ring);color:var(--text);padding:10px;border-radius:10px}
+    .tag{padding:2px 8px;border-radius:999px;background:#0d2239;border:1px solid var(--ring);color:#b7d3ff;font-size:12px}
+    .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .toast{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);background:#0e1d30;border:1px solid var(--ring);padding:8px 12px;border-radius:10px;display:none}
+    .toast.show{display:block}
+  </style>
 </head>
 <body>
-<header><div id="wrap">🔥 Aurion v1 — Chat</div></header>
-<div id="wrap">
-  <div id="log"></div>
-</div>
-<div id="bar">
-  <div id="wrap">
-    <textarea id="msg" placeholder="Speak to the forge… (Enter = send, Shift+Enter = newline)"></textarea>
-    <div id="actions">
-      <button id="send">Send</button>
-      <label><input type="checkbox" id="core" checked /> Include core memories</label>
-      <div id="thinking"></div>
+  <header>
+    <div style="font-size:20px">🔥</div>
+    <h1>Aurion v1 — Chat</h1>
+    <div class="spacer"></div>
+    <div class="pill" title="This name tags your messages for per-user history">
+      <span class="muted">User</span>
+      <input id="user" placeholder="name" />
+    </div>
+    <button id="coreBtn" class="btn ghost" title="Edit core memories">Core Memories</button>
+  </header>
+
+  <main class="wrap">
+    <div id="log" aria-live="polite"></div>
+
+    <section class="composer">
+      <div class="box">
+        <textarea id="msg" placeholder="Speak to the forge…"></textarea>
+        <button id="send" class="btn">Send</button>
+      </div>
+      <div class="hint">Chat persists on the server; core memories can be edited from the Core panel.</div>
+    </section>
+  </main>
+
+  <!-- Core Memories Modal -->
+  <div id="coreModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="coreTitle">
+    <div class="scrim"></div>
+    <div class="sheet">
+      <div class="toolbar" style="justify-content:space-between">
+        <h2 id="coreTitle" style="display:flex;align-items:center;gap:8px">🧠 Core Memories <span class="tag">system</span></h2>
+        <div class="toolbar">
+          <button id="addCore" class="btn ghost">Add memory</button>
+          <button id="saveCore" class="btn">Save</button>
+          <button id="closeCore" class="btn ghost">Close</button>
+        </div>
+      </div>
+      <div id="coreList" style="margin-top:8px"></div>
+      <p class="muted" style="margin-top:8px">These are injected as system context on each request.</p>
     </div>
   </div>
-</div>
 
-<script>
-(() => {
-  const log = document.getElementById('log');
-  const msg = document.getElementById('msg');
-  const btn = document.getElementById('send');
-  const thinking = document.getElementById('thinking');
-  const core = document.getElementById('core');
+  <div id="toast" class="toast"></div>
 
-  // sticky user id for server-side memory
-  let uid = localStorage.getItem('aurion.uid');
-  if (!uid) { uid = Math.random().toString(36).slice(2); localStorage.setItem('aurion.uid', uid); }
+  <script>
+    // ---------- helpers ----------
+    const $ = sel => document.querySelector(sel);
+    const log = $("#log"), msg = $("#msg"), sendBtn = $("#send");
+    const userInput = $("#user"), coreBtn = $("#coreBtn");
+    const modal = $("#coreModal"), coreList = $("#coreList");
+    const addCoreBtn = $("#addCore"), saveCoreBtn = $("#saveCore"), closeCoreBtn = $("#closeCore");
+    const toast = $("#toast");
 
-  function add(role, text) {
-    const div = document.createElement('div');
-    div.className = `row ${role}`;
-    div.textContent = text;
-    log.appendChild(div);
-    log.scrollTop = log.scrollHeight;
-  }
+    const uid = (() => {
+      let id = localStorage.getItem("aurion.uid");
+      if (!id) { id = Math.random().toString(36).slice(2); localStorage.setItem("aurion.uid", id); }
+      return id;
+    })();
 
-  function dotter() {
-    let n = 0; thinking.textContent = 'Aurion is thinking';
-    const id = setInterval(() => {
-      n = (n + 1) % 4;
-      thinking.textContent = 'Aurion is thinking' + '.'.repeat(n);
-    }, 400);
-    return () => { clearInterval(id); thinking.textContent = ''; };
-  }
+    // keep user's display name
+    userInput.value = localStorage.getItem("aurion.user") || "steve";
+    userInput.addEventListener("input", () => localStorage.setItem("aurion.user", userInput.value.trim()));
 
-  async function send() {
-    const text = msg.value.trim();
-    if (!text) return;
-    add('me', text);
-    msg.value = '';
+    function showToast(text, ms=1400){
+      toast.textContent = text; toast.classList.add("show");
+      setTimeout(()=>toast.classList.remove("show"), ms);
+    }
 
-    const stop = dotter();
-    btn.disabled = true;
-    try {
-      const r = await fetch('/chat', {
-        method: 'POST',
-        headers: { 'Content-Type':'application/json' },
-        body: JSON.stringify({ message: text, u: uid, core: core.checked })
-      });
-      const j = await r.json();
-      add('bot', j.reply || `Error: ${j.error || 'unknown'}`);
-    } catch (e) {
-      add('bot', 'Error: ' + (e.message || e));
-    } finally {
-      btn.disabled = false;
-      stop();
+    function addBubble(who, text){
+      const row = document.createElement("div");
+      row.className = who === "me" ? "row me" : "row bot";
+      const b = document.createElement("div");
+      b.className = "bubble";
+      b.innerHTML = who === "me"
+        ? `<span class="label">You:</span> ${escapeHtml(text)}`
+        : `<span class="label">Aurion:</span> ${text}`;
+      row.appendChild(b);
+      log.appendChild(row);
+      log.scrollTop = log.scrollHeight;
+      return b; // return bubble node (so we can mutate for typing)
+    }
+
+    function escapeHtml(s){
+      return s.replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
+
+    // typing indicator bubble (animated dots)
+    function addTyping(){
+      const bubble = addBubble("bot",
+        `<span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>`);
+      return bubble;
+    }
+
+    async function send(){
+      const text = msg.value.trim();
+      if (!text) return;
+      addBubble("me", text);
+      msg.value = "";
       msg.focus();
-    }
-  }
 
-  btn.addEventListener('click', send);
-  msg.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault(); send();
-    }
-  });
+      sendBtn.disabled = true;
+      const typing = addTyping();
 
-  // greet
-  add('bot', 'Aurion: Online. The climb awaits. What shall we forge?');
-})();
-</script>
+      try{
+        const r = await fetch("/chat", {
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify({
+            message: text,
+            u: uid,
+            core: true // always include core memories
+          })
+        });
+        const j = await r.json();
+        const reply = j?.reply || ("(error) " + (j?.error || "Unknown"));
+        typing.innerHTML = `<span class="label">Aurion:</span> ${escapeHtml(reply.replace(/^Aurion:\s*/i,""))}`;
+      }catch(e){
+        typing.innerHTML = `<span class="label">Aurion:</span> (error: ${escapeHtml(e.message || String(e))})`;
+      }finally{
+        sendBtn.disabled = false;
+        log.scrollTop = log.scrollHeight;
+      }
+    }
+
+    sendBtn.addEventListener("click", send);
+    msg.addEventListener("keydown", e=>{
+      if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); }
+    });
+
+    // greet once
+    if (!sessionStorage.getItem("aurion.greeted")){
+      addBubble("bot","Aurion: Online. The climb awaits. What shall we forge?");
+      sessionStorage.setItem("aurion.greeted","1");
+    }
+
+    // ---------- Core memories modal ----------
+    coreBtn.addEventListener("click", openCore);
+    closeCoreBtn.addEventListener("click", () => modal.classList.remove("open"));
+    modal.querySelector(".scrim").addEventListener("click", () => modal.classList.remove("open"));
+    addCoreBtn.addEventListener("click", () => addCoreRow(""));
+
+    saveCoreBtn.addEventListener("click", async () => {
+      const values = Array.from(coreList.querySelectorAll("input"))
+        .map(i=>i.value.trim())
+        .filter(Boolean);
+      try{
+        const r = await fetch("/core", { method:"POST", headers:{'Content-Type':'application/json'}, body:JSON.stringify({ core: values }) });
+        const j = await r.json();
+        if (j?.ok) showToast("Core memories saved");
+        else showToast("Save failed");
+      }catch{ showToast("Save failed"); }
+    });
+
+    async function openCore(){
+      coreList.innerHTML = "";
+      modal.classList.add("open");
+      try{
+        const r = await fetch("/core");
+        const j = await r.json();
+        const items = Array.isArray(j?.core) ? j.core : (Array.isArray(j?.data?.core) ? j.data.core : []);
+        if (!items.length) addCoreRow("");
+        else items.forEach(x=>addCoreRow(x));
+      }catch{
+        addCoreRow("");
+      }
+    }
+
+    function addCoreRow(value){
+      const row = document.createElement("div");
+      row.className = "rowline";
+      row.innerHTML = `
+        <input type="text" value="${escapeHtml(value)}" placeholder="e.g. Aurion was forged on Aug 15, 2025 by Steve Reyher."/>
+        <button class="btn ghost remove">Remove</button>`;
+      row.querySelector(".remove").addEventListener("click", ()=> row.remove());
+      coreList.appendChild(row);
+    }
+  </script>
 </body>
 </html>
