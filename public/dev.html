@@ -1,114 +1,77 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8"/>
   <title>Aurion Developer Console</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0b0c12;color:#e8ecf1;padding:20px}
-    h1,h2{margin:10px 0}
-    textarea,input,button{font:inherit}
-    textarea{width:100%;min-height:180px;background:#111522;color:#dfe6ee;border:1px solid #2a3348;border-radius:10px;padding:12px}
-    input[type=text]{width:100%;background:#111522;color:#dfe6ee;border:1px solid #2a3348;border-radius:10px;padding:10px}
-    button{background:#3b82f6;border:none;color:white;padding:10px 14px;border-radius:10px;cursor:pointer}
-    button:disabled{opacity:.6;cursor:not-allowed}
-    .row{display:grid;gap:12px}
-    .two{grid-template-columns:1fr 1fr}
-    .card{background:#0f1423;border:1px solid #22304a;border-radius:14px;padding:14px;margin:14px 0}
-    pre{white-space:pre-wrap;background:#0f1423;border:1px dashed #2a3348;padding:10px;border-radius:10px}
-    .small{opacity:.8;font-size:.9em}
-    label{display:block;margin-bottom:6px}
+    body{font-family:system-ui, -apple-system, Segoe UI, Roboto, Inter, sans-serif; background:#0b0c10; color:#e5e7eb; padding:18px}
+    input, textarea, select, button{background:#111318;color:#e5e7eb;border:1px solid #22262e;border-radius:8px;padding:10px}
+    button{background:#1f2937;cursor:pointer} button:hover{background:#263241}
+    .card{border:1px solid #22262e;border-radius:10px;padding:12px;margin:10px 0}
+    pre{white-space:pre-wrap;background:#0f1220;padding:10px;border-radius:8px}
   </style>
 </head>
 <body>
   <h1>🔥 Aurion Developer Console</h1>
-  <p class="small">Stage changes, auto-backup to a GitHub branch, and open a PR — safely.</p>
 
   <div class="card">
-    <h2>1) Paste & Stage Files</h2>
-    <div class="row">
-      <label>Commit Message:
-        <input id="msg" type="text" placeholder="Describe this change clearly" />
-      </label>
-      <label>Target Path (e.g. <code>server.js</code> or <code>public/index.html</code>):
-        <input id="path" type="text" placeholder="server.js" />
-      </label>
-      <label>File Contents:</label>
-      <textarea id="contents" placeholder="// paste full file content here"></textarea>
-      <button id="stage">Stage Patch</button>
-    </div>
-    <p id="stageStatus" class="small"></p>
+    <h3>Propose change</h3>
+    <p>Target path (e.g., <code>server.js</code> or <code>public/index.html</code>)</p>
+    <input id="path" style="width:100%" placeholder="public/index.html"/>
+    <p>Reason</p>
+    <input id="reason" style="width:100%" placeholder="short rationale"/>
+    <p>New file content</p>
+    <textarea id="content" style="width:100%;height:180px"></textarea>
+    <br><br>
+    <button onclick="propose()">Propose</button>
+    <pre id="out"></pre>
   </div>
 
   <div class="card">
-    <h2>2) Apply (Auto-backup + Pull Request)</h2>
-    <button id="apply">Apply Staged Patch</button>
-    <p id="applyStatus" class="small"></p>
-  </div>
-
-  <div class="card">
-    <h2>Core Memory Editor</h2>
-    <div class="row two">
-      <div>
-        <p class="small">One memory per line (kept across restarts):</p>
-        <textarea id="coreBox"></textarea>
-        <button id="saveCore">Save Core</button>
-      </div>
-      <div>
-        <p class="small">Current core.json:</p>
-        <pre id="coreView">(loading...)</pre>
-      </div>
-    </div>
-    <p class="small">File lives at <code>core.json</code>.</p>
+    <h3>Pending proposals</h3>
+    <button onclick="load()">Refresh</button>
+    <div id="list"></div>
   </div>
 
 <script>
-const $ = (id)=>document.getElementById(id);
-let staged = null;
-
-$("stage").onclick = async () => {
-  const path = $("path").value.trim();
-  const contents = $("contents").value;
-  const message = $("msg").value.trim() || "Aurion dev patch";
-  if (!path || !contents) { $("stageStatus").textContent = "Path and contents required."; return; }
-
+async function propose(){
   const r = await fetch("/dev/propose", {
     method:"POST",
     headers:{ "Content-Type":"application/json" },
-    body: JSON.stringify({ message, files:[{ path, content: contents }] })
+    body: JSON.stringify({ filePath: path.value, newContent: content.value, reason: reason.value })
   });
-  const j = await r.json();
-  if (!j.ok) { $("stageStatus").textContent = "Error: " + j.error; return; }
-  staged = j.patch;
-  $("stageStatus").textContent = "Staged. Ready to apply.";
-};
-
-$("apply").onclick = async () => {
-  $("apply").disabled = true;
-  $("applyStatus").textContent = "Applying (creating backup branch + PR)...";
-  const r = await fetch("/dev/apply", { method:"POST" });
-  const j = await r.json();
-  $("apply").disabled = false;
-  if (!j.ok) { $("applyStatus").textContent = "Error: " + j.error; return; }
-  $("applyStatus").innerHTML = `✅ Branch <b>${j.branch}</b> created. PR #${j.pr.number}: <a href="${j.pr.url}" target="_blank" rel="noreferrer">${j.pr.url}</a>`;
-  staged = null;
-};
-
-// Core memory load/save
-async function loadCore(){
-  const r = await fetch("/core");
-  const j = await r.json();
-  $("coreView").textContent = JSON.stringify(j, null, 2);
-  $("coreBox").value = (j.core||[]).join("\n");
+  out.textContent = await r.text();
+  load();
 }
-$("saveCore").onclick = async () => {
-  const lines = $("coreBox").value.split("\n").map(s=>s.trim()).filter(Boolean);
-  const r = await fetch("/core", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ core: lines })});
+
+async function load(){
+  const r = await fetch("/dev/proposals");
   const j = await r.json();
-  if (!j.ok) alert("Error: " + j.error);
-  await loadCore();
-};
-loadCore();
+  list.innerHTML = "";
+  j.proposals.forEach(p=>{
+    const d = document.createElement("div");
+    d.className = "card";
+    d.innerHTML = `<div><b>${p.filePath}</b> — ${p.time}</div>
+    <div>Reason: ${p.reason || "(none)"}</div>
+    <details><summary>Content</summary><pre>${escapeHtml(p.newContent)}</pre></details>
+    <button onclick="approve('${p.id}')">Approve → GitHub PR</button>`;
+    list.appendChild(d);
+  });
+}
+
+async function approve(id){
+  const r = await fetch("/dev/approve", {
+    method:"POST", headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ id })
+  });
+  alert(await r.text());
+  load();
+}
+
+function escapeHtml(s){ return s.replace(/[&<>"']/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[m])) }
+
+load();
 </script>
 </body>
 </html>
