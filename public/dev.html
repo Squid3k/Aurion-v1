@@ -24,7 +24,41 @@
     a{ color:#8fb5ff; text-decoration:none }
   </style>
 </head>
-<body>
+<body><hr>
+<h2>Paste & Stage File</h2>
+<p>Paste full file contents here and stage directly (phone friendly).</p>
+<form id="pasteForm">
+  <label for="path">Target Path:</label>
+  <input type="text" id="path" value="server.js" style="width: 300px;" />
+  <br><br>
+  <textarea id="content" rows="15" cols="80" placeholder="Paste file contents here..."></textarea>
+  <br><br>
+  <button type="submit">Stage File</button>
+</form>
+
+<script>
+document.getElementById("pasteForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const path = document.getElementById("path").value;
+  const content = document.getElementById("content").value;
+  if (!content.trim()) {
+    alert("Paste some content first.");
+    return;
+  }
+
+  const res = await fetch("/dev/stage", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, content })
+  });
+  const j = await res.json();
+  if (j.ok) {
+    alert("Staged: " + path + " (" + j.bytes + " bytes)");
+  } else {
+    alert("Error: " + j.error);
+  }
+});
+</script>
   <header>
     <h1>🔥 Aurion v1 — Dev Console</h1>
     <a href="/">← Back to chat</a>
