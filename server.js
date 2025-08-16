@@ -4,222 +4,189 @@ import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
 import bodyParser from "body-parser";
-import multer from "multer";
+import dotenv from "dotenv";
 
+dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ---------- Storage dirs (Render Disk preferred) ----------
-const ROOT = process.cwd();
-const PERSIST = process.env.MEM_DIR || "/data";                 // Render Disk mount (if added)
-const FALLBACK = "/tmp/aurion-data";                            // Ephemeral fallback
-const DATA_DIR = fs.existsSync(PERSIST) ? PERSIST : FALLBACK;
-
-const TX_FILE   = path.join(DATA_DIR, "transcripts.jsonl");
-const CORE_FILE = path.join(DATA_DIR, "core.json");
-const BAK_DIR   = path.join(DATA_DIR, "backups");
-
-// ensure dirs/files
-fs.mkdirSync(DATA_DIR, { recursive: true });
-fs.mkdirSync(BAK_DIR,   { recursive: true });
-if (!fs.existsSync(TX_FILE))   fs.writeFileSync(TX_FILE, "");
-if (!fs.existsSync(CORE_FILE)) fs.writeFileSync(CORE_FILE, JSON.stringify({ core: [] }, null, 2));
-
-// ---------- Middleware ----------
 app.use(bodyParser.json({ limit: "2mb" }));
 app.use(express.static("public"));
 
-// for drag & drop uploads
-const upload = multer({ storage: multer.memoryStorage() });
+// ====== STORAGE (persistent on Render Disk or project root) ======
+const DATA_DIR = process.env.DATA_DIR || "./";
+const TX_FILE   = path.join(DATA_DIR, "transcripts.jsonl");
+const CORE_FILE = path.join(DATA_DIR, "core.json");
 
-// ---------- Helpers ----------
+if (!fs.existsSync(TX_FILE))   fs.writeFileSync(TX_FILE, "");
+if (!fs.existsSync(CORE_FILE)) fs.writeFileSync(CORE_FILE, JSON.stringify({ core: [] }, null, 2));
+
 const txAppend = (user, role, content) => {
   fs.appendFileSync(TX_FILE, JSON.stringify({ user, role, content, time: Date.now() }) + "\n");
 };
-const getCore  = () => JSON.parse(fs.readFileSync(CORE_FILE, "utf8"));
-const saveCore = (data) => fs.writeFileSync(CORE_FILE, JSON.stringify(data, null, 2));
+const getCore = () => JSON.parse(fs.readFileSync(CORE_FILE, "utf-8"));
+const saveCore = (obj) => fs.writeFileSync(CORE_FILE, JSON.stringify(obj, null, 2));
 
-const ts = () => new Date().toISOString().replace(/[:.]/g, "-");
-
-// limit what files Aurion is allowed to change
-const ALLOWLIST = new Set([
-  "server.js",
-  "package.json",
-  "public/index.html",
-  "public/dev.html",
-  "public/admin.html",
-  "public/chat.html",
-  "public/styles.css"
-]);
-
-// ensure path is inside project + allowlisted
-function sanitizeAndCheck(relPath) {
-  if (!relPath) throw new Error("Missing path");
-  const normalized = path.posix.normalize(relPath).replace(/^\/+/, "");
-  const abs = path.join(ROOT, normalized);
-  if (!ALLOWLIST.has(normalized)) {
-    throw new Error(`Path not allowed: ${normalized}`);
-  }
-  if (!abs.startsWith(ROOT)) throw new Error("Path escapes project root");
-  return { abs, normalized };
-}
-
-function backupFile(absPath, normalized) {
-  if (!fs.existsSync(absPath)) return null;
-  const bname = normalized.replace(/\//g, "__");
-  const file = path.join(BAK_DIR, `${bname}.${ts()}.bak`);
-  fs.copyFileSync(absPath, file);
-  return file;
-}
-
-// ---------- Health ----------
-app.get("/", (req, res) => {
-  res.json({
-    success: true,
-    message: "Aurion-v1 connected to OpenAI!",
-    count: 79,
-    dataDir: DATA_DIR
-  });
-});
-
-// ---------- Chat ----------
+// ====== CHAT ======
 app.post("/chat", async (req, res) => {
   try {
-    const { message, u = "guest", prime, core } = req.body;
-    if (!message) return res.status(400).json({ success: false, error: "message required" });
+    const { message, u = "anon", prime, useCore = true } = req.body || {};
+    if (!message) return res.status(400).json({ success:false, error:"message required" });
 
-    // load recent history
-    const history = fs.readFileSync(TX_FILE, "utf8")
-      .trim().split("\n").filter(Boolean)
-      .map(line => JSON.parse(line))
+    const history = fs
+      .readFileSync(TX_FILE, "utf-8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map(l => JSON.parse(l))
       .slice(-15);
 
-    const coreData = getCore();
+    const core = useCore ? getCore() : { core: [] };
 
+    // Important: ONLY the server prefixes "Aurion:" (UI should not)
     const messages = [
-      { role: "system", content: "You are Aurion, guide to Steve Reyher. Speak with precision, warmth, mythic fire, and light humor." },
-      prime ? { role: "system", content: prime } : null,
-      (core && coreData.core?.length)
-        ? { role: "system", content: `Core memories: ${coreData.core.join("; ")}` }
-        : null,
-      ...history.map(h => ({ role: h.role, content: h.content })),
-      { role: "user", content: message }
+      { role:"system", content:"You are Aurion, guide to Steve Reyher. Speak with precision, warmth, mythic fire, and light humor. Do NOT start your reply with your name unless explicitly requested; the system will prefix it." },
+      prime ? { role:"system", content: prime } : null,
+      (core.core?.length ? { role:"system", content: `Core memories: ${core.core.join("; ")}` } : null),
+      ...history.map(h => ({ role:h.role, content:h.content })),
+      { role:"user", content: message }
     ].filter(Boolean);
 
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+      method:"POST",
+      headers:{
+        "Content-Type":"application/json",
+        "Authorization":`Bearer ${process.env.OPENAI_API_KEY}`
       },
-      body: JSON.stringify({ model: "gpt-4o-mini", messages })
+      body: JSON.stringify({ model:"gpt-4o-mini", messages })
     });
 
     const j = await r.json();
-    let reply = j?.choices?.[0]?.message?.content || "(silent embers)";
-    reply = `Aurion: ${reply}`;
+    if (!r.ok) throw new Error(`OpenAI error ${r.status}: ${JSON.stringify(j)}`);
+
+    let reply = j.choices?.[0]?.message?.content?.trim() || "(silent embers)";
+    reply = `Aurion: ${reply}`; // single prefix only
 
     txAppend(u, "user", message);
     txAppend(u, "assistant", reply);
-
-    res.json({ success: true, reply });
+    res.json({ success:true, reply });
   } catch (e) {
-    res.status(500).json({ success: false, error: String(e) });
+    res.status(500).json({ success:false, error:String(e) });
   }
 });
 
-// ---------- Core memory admin ----------
-app.get("/core", (req, res) => res.json(getCore()));
-
+// ====== CORE MEMORY ADMIN ======
+app.get("/core", (_req, res) => res.json(getCore()));
 app.post("/core", (req, res) => {
-  try {
-    const { core } = req.body;
-    if (!Array.isArray(core)) return res.status(400).json({ ok: false, error: "core must be an array of strings" });
-    saveCore({ core });
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
-  }
+  const { core } = req.body || {};
+  if (!Array.isArray(core)) return res.status(400).json({ ok:false, error:"core must be an array of strings" });
+  saveCore({ core });
+  res.json({ ok:true });
 });
 
-// ---------- Developer console: stage/apply with backups ----------
-app.post("/dev/stage", (req, res) => {
-  try {
-    const { path: relPath, content } = req.body;
-    if (!content && content !== "") return res.status(400).json({ ok: false, error: "content required" });
-
-    const { abs, normalized } = sanitizeAndCheck(relPath);
-    const bakPath = backupFile(abs, normalized);
-
-    // ensure parent dir
-    fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.writeFileSync(abs, content);
-
-    res.json({
-      ok: true,
-      wrote: normalized,
-      backup: bakPath ? path.basename(bakPath) : null,
-      note: "File staged successfully"
-    });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: String(e) });
-  }
-});
-
-// list backups
-app.get("/dev/backups", (req, res) => {
-  try {
-    const files = fs.readdirSync(BAK_DIR)
-      .filter(f => f.endsWith(".bak"))
-      .sort()
-      .reverse()
-      .slice(0, 200); // cap
-    res.json({ ok: true, backups: files });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
-  }
-});
-
-// restore a backup
-app.post("/dev/restore", (req, res) => {
-  try {
-    const { backup } = req.body; // e.g. "public__dev.html.2025-08-15T19-55-01-234Z.bak"
-    if (!backup || backup.includes("..") || backup.includes("/")) {
-      return res.status(400).json({ ok: false, error: "invalid backup name" });
+// ====== DEV: PROPOSE + APPLY (auto backup branch + PR) ======
+// Env you must set on Render: GITHUB_TOKEN (repo scope), GH_OWNER, GH_REPO, GH_BASE (e.g. "main")
+const GH = {
+  token: process.env.GITHUB_TOKEN,
+  owner: process.env.GH_OWNER,
+  repo:  process.env.GH_REPO,
+  base:  process.env.GH_BASE || "main"
+};
+const github = async (url, init={}) => {
+  if (!GH.token || !GH.owner || !GH.repo) throw new Error("GitHub env not configured");
+  const r = await fetch(`https://api.github.com${url}`, {
+    ...init,
+    headers: {
+      "Authorization": `Bearer ${GH.token}`,
+      "Accept": "application/vnd.github+json",
+      "Content-Type": "application/json",
+      ...(init.headers||{})
     }
-    const bakAbs = path.join(BAK_DIR, backup);
-    if (!fs.existsSync(bakAbs)) return res.status(404).json({ ok: false, error: "backup not found" });
+  });
+  const j = await r.json();
+  if (!r.ok) throw new Error(`GitHub ${r.status}: ${JSON.stringify(j)}`);
+  return j;
+};
+const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
 
-    // infer target file from backup name
-    const originalRel = backup.replace(/\.([0-9T\-]+)\.bak$/, "").replace(/__/g, "/");
-    const { abs, normalized } = sanitizeAndCheck(originalRel);
+// Create a short-lived “patch cache” so you can stage then apply
+let LAST_PATCH = null;
 
-    // backup current before restore
-    backupFile(abs, normalized);
-    fs.copyFileSync(bakAbs, abs);
+// 1) Propose: validate & echo back
+app.post("/dev/propose", (req, res) => {
+  const { files, message = "Aurion dev patch" } = req.body || {};
+  if (!Array.isArray(files) || files.length === 0)
+    return res.status(400).json({ ok:false, error:"Provide files: [{path, content}]" });
 
-    res.json({ ok: true, restored: normalized });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: String(e) });
+  // minimal validation
+  for (const f of files) {
+    if (!f.path || typeof f.content !== "string")
+      return res.status(400).json({ ok:false, error:"Each file needs path + content (string)" });
   }
+  LAST_PATCH = { files, message, time: Date.now() };
+  res.json({ ok:true, patch: LAST_PATCH });
 });
 
-// optional: drag & drop upload (multipart) -> writes to allowlisted file
-app.post("/dev/upload", upload.single("file"), (req, res) => {
+// 2) Apply: create branch from base, upsert files, open PR
+app.post("/dev/apply", async (_req, res) => {
   try {
-    const relPath = req.body.path;
-    if (!req.file) return res.status(400).json({ ok: false, error: "no file uploaded" });
-    const content = req.file.buffer.toString("utf8");
-    const { abs, normalized } = sanitizeAndCheck(relPath);
-    const bakPath = backupFile(abs, normalized);
-    fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.writeFileSync(abs, content);
-    res.json({ ok: true, wrote: normalized, backup: bakPath ? path.basename(bakPath) : null });
+    if (!LAST_PATCH) return res.status(400).json({ ok:false, error:"No patch staged" });
+
+    // Get base SHA
+    const baseRef = await github(`/repos/${GH.owner}/${GH.repo}/git/ref/heads/${GH.base}`);
+    const baseSha = baseRef.object.sha;
+
+    // Create backup branch name
+    const branch = `aurion-auto-${new Date().toISOString().replace(/[:.]/g,"-")}`;
+
+    // Create branch (ref)
+    await github(`/repos/${GH.owner}/${GH.repo}/git/refs`, {
+      method:"POST",
+      body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: baseSha })
+    });
+
+    // Upsert each file via Contents API
+    for (const f of LAST_PATCH.files) {
+      // Check if file exists to include its SHA (update vs create)
+      let sha = undefined;
+      try {
+        const existing = await github(`/repos/${GH.owner}/${GH.repo}/contents/${encodeURIComponent(f.path)}?ref=${branch}`);
+        sha = existing.sha;
+      } catch { /* not found → create */ }
+
+      await github(`/repos/${GH.owner}/${GH.repo}/contents/${encodeURIComponent(f.path)}`, {
+        method:"PUT",
+        body: JSON.stringify({
+          message: `[aurion] ${LAST_PATCH.message}`,
+          content: b64(f.content),
+          branch,
+          sha
+        })
+      });
+    }
+
+    // Open PR
+    const pr = await github(`/repos/${GH.owner}/${GH.repo}/pulls`, {
+      method:"POST",
+      body: JSON.stringify({
+        title: `[aurion] ${LAST_PATCH.message}`,
+        head: branch,
+        base: GH.base,
+        body: "Auto-created by Aurion dev console. Please review and merge."
+      })
+    });
+
+    const result = { ok:true, branch, pr: { number: pr.number, url: pr.html_url } };
+    LAST_PATCH = null; // clear staged patch
+    res.json(result);
   } catch (e) {
-    res.status(400).json({ ok: false, error: String(e) });
+    res.status(500).json({ ok:false, error:String(e) });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Aurion v1 listening on ${PORT}, data dir: ${DATA_DIR}`);
+// ====== HEALTH ======
+app.get("/", (_req, res) => {
+  res.json({ ok:true, name:"aurion-v1", version:"2.0", model:"gpt-4o-mini", count: fs.readFileSync(TX_FILE, "utf-8").trim().split("\n").filter(Boolean).length });
 });
+
+app.listen(PORT, () => console.log(`Aurion v1 listening on ${PORT}; data dir=${DATA_DIR}`));
