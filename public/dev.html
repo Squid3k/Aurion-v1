@@ -1,109 +1,76 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>Aurion Developer Console</title>
+<meta charset="UTF-8" />
+<title>Aurion v1 — Dev Console</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-body {
-  font-family: sans-serif;
-  max-width: 900px;
-  margin: 0 auto;
-  padding: 1rem;
-  line-height: 1.4;
-}
-section {
-  margin-bottom: 2rem;
-}
-textarea {
-  width: 100%;
-  min-height: 200px;
-  font-family: monospace;
-  margin-top: 0.5rem;
-}
-button {
-  padding: 0.5rem 1rem;
-  margin-top: 0.5rem;
-}
-label {
-  display: block;
-  margin-top: 0.5rem;
-}
+  body { font-family: system-ui, sans-serif; max-width: 960px; margin: 20px auto; padding: 0 12px; }
+  textarea { width: 100%; min-height: 180px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  button { padding: 8px 14px; border: 0; background: #0a7; color: #fff; border-radius: 8px; margin-top: 8px; }
+  section { margin: 24px 0; padding: 16px; border: 1px solid #ddd; border-radius: 12px; }
+  h2 { margin: 0 0 10px; }
+  label { display:block; margin:8px 0; }
+  .warn { color:#a00; }
+  .ok { color:#0a7; }
 </style>
 </head>
 <body>
-<h1>Aurion Developer Console</h1>
+<h1>🔥 Aurion Developer Console</h1>
 
 <section>
-  <h2>Core Memory</h2>
-  <p>Edit Aurion’s core memories (one per line) and save.</p>
-  <textarea id="coreArea"></textarea>
-  <button id="saveCore">Save Core</button>
-  <p id="coreStatus"></p>
+  <h2>Core memories</h2>
+  <p>One memory per line:</p>
+  <textarea id="core"></textarea>
+  <div>
+    <button id="save">Save core</button>
+    <span id="coreMsg"></span>
+  </div>
 </section>
 
 <section>
-  <h2>Patch & Update Code</h2>
-  <p>Paste the full contents of the file you wish to replace (e.g., <code>server.js</code>). On apply, the existing file will be backed up and replaced by your patch.</p>
-  <label>
-    Target file:
-    <select id="target">
-      <option value="server.js">server.js</option>
-    </select>
-  </label>
-  <textarea id="patchArea"></textarea>
-  <button id="propose">Propose Patch</button>
-  <button id="apply">Apply Patch</button>
-  <p id="patchStatus"></p>
+  <h2>Self-patch (with backup)</h2>
+  <p class="warn">Danger zone: this replaces a file. The current file is backed up first.</p>
+  <label>Target file (relative to project root): <input id="target" value="server.js"/></label>
+  <p>Paste FULL new file contents here:</p>
+  <textarea id="patch"></textarea>
+  <div>
+    <button id="propose">Propose</button>
+    <button id="apply">Apply</button>
+    <span id="patchMsg"></span>
+  </div>
 </section>
 
 <script>
-// Load current core memories
-async function loadCore() {
-  const res = await fetch('/core');
-  const data = await res.json();
-  document.getElementById('coreArea').value = (data.core || []).join('\n');
+async function loadCore(){
+  const r = await fetch('/core'); const j = await r.json();
+  document.getElementById('core').value = (j.core||[]).join('\n');
 }
 loadCore();
 
-document.getElementById('saveCore').onclick = async () => {
-  const lines = document.getElementById('coreArea').value.split(/\r?\n/).filter(Boolean);
-  const res = await fetch('/core', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ core: lines })
-  });
-  const data = await res.json();
-  document.getElementById('coreStatus').textContent = data.ok ? 'Core saved!' : 'Error saving core';
+document.getElementById('save').onclick = async () => {
+  const lines = document.getElementById('core').value.split(/\r?\n/).filter(Boolean);
+  const r = await fetch('/core', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ core: lines }) });
+  const j = await r.json();
+  document.getElementById('coreMsg').textContent = j.ok ? 'Saved ✓' : ('Error: '+(j.error||''));
+  document.getElementById('coreMsg').className = j.ok ? 'ok' : 'warn';
 };
 
 document.getElementById('propose').onclick = async () => {
-  const patch = document.getElementById('patchArea').value;
-  const res = await fetch('/dev/propose', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ patch })
-  });
-  const data = await res.json();
-  document.getElementById('patchStatus').textContent =
-    data.ok ? 'Patch looks valid. Ready to apply.' : `Error: ${data.error}`;
+  const patch = document.getElementById('patch').value;
+  const r = await fetch('/dev/propose', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ patch }) });
+  const j = await r.json();
+  document.getElementById('patchMsg').textContent = j.ok ? 'Looks valid. Ready to apply.' : ('Error: '+(j.error||''));
+  document.getElementById('patchMsg').className = j.ok ? 'ok' : 'warn';
 };
 
 document.getElementById('apply').onclick = async () => {
-  const patch = document.getElementById('patchArea').value;
+  const patch = document.getElementById('patch').value;
   const target = document.getElementById('target').value;
-  const res = await fetch('/dev/apply', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ patch, target })
-  });
-  const data = await res.json();
-  if (data.ok) {
-    document.getElementById('patchStatus').textContent =
-      `Patch applied. Backup created: ${data.backup}`;
-  } else {
-    document.getElementById('patchStatus').textContent =
-      `Error applying patch: ${data.error}`;
-  }
+  const r = await fetch('/dev/apply', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ patch, target }) });
+  const j = await r.json();
+  document.getElementById('patchMsg').textContent = j.ok ? ('Applied ✓ — backup: '+j.backup) : ('Error: '+(j.error||''));
+  document.getElementById('patchMsg').className = j.ok ? 'ok' : 'warn';
 };
 </script>
 </body>
