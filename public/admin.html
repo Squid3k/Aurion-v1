@@ -1,57 +1,219 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Aurion v1 — Core Memories</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Aurion v1 — Core Memory Admin</title>
   <style>
-    body{ margin:0; background:#0b0b0f; color:#e8e8f2; font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif }
-    header{ padding:14px 16px; background:#141419; display:flex; justify-content:space-between; align-items:center }
-    a{ color:#93c5fd; text-decoration:none }
-    main{ max-width:900px; margin:16px auto; padding:0 12px }
-    textarea{ width:100%; min-height:360px; padding:12px; border-radius:10px; border:1px solid #2b2f3b; background:#0f1118; color:#e8e8f2 }
-    button{ margin-top:10px; padding:10px 14px; border:0; border-radius:10px; background:#3b82f6; color:#fff; font-weight:700 }
-    #auth{ width:320px; padding:8px; border-radius:8px; border:1px solid #2b2f3b; background:#0f1118; color:#e8e8f2 }
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: #0b0c10; color: #e6e6e6;
+    }
+    header {
+      position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px);
+      background: rgba(12,14,18,0.85); border-bottom: 1px solid #262a33; padding: 14px 16px;
+    }
+    h1 { margin: 0; font-size: 18px; font-weight: 700; }
+    main { padding: 16px; max-width: 900px; margin: 0 auto; }
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: start; }
+    .card {
+      background: #12141b; border: 1px solid #232836; border-radius: 12px; padding: 12px;
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.02) inset;
+    }
+    .muted { color: #9aa3b2; font-size: 13px; }
+    textarea, input[type="text"] {
+      width: 100%; border-radius: 10px; border: 1px solid #2a3142; background: #0f1117; color: #e6e6e6;
+      padding: 10px 12px; font-size: 15px; line-height: 1.4; outline: none;
+    }
+    textarea:focus, input[type="text"]:focus { border-color: #6aa3ff; box-shadow: 0 0 0 3px rgba(106,163,255,0.25); }
+    button {
+      border: 1px solid #2a3142; background: #171a22; color: #e6e6e6; padding: 8px 12px; border-radius: 10px;
+      font-weight: 600; cursor: pointer;
+    }
+    button.primary { background: #2663ff; border-color: #3d72ff; }
+    button.ghost { background: transparent; }
+    button.warn { background: #7c1e1e; border-color: #a02f2f; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .list { display: grid; gap: 10px; margin-top: 10px; }
+    .item { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: start; }
+    .item textarea { height: 72px; }
+    .chip { display:inline-block; padding:4px 8px; border:1px solid #2a3142; border-radius:999px; font-size:12px; color:#b7c0cf; }
+    .rowBtns { display: flex; gap: 6px; flex-wrap: wrap; }
+    .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .footerNote { margin-top: 10px; font-size: 12px; color: #9aa3b2; }
   </style>
 </head>
 <body>
-  <header>
-    <div>🔥 Aurion v1 — Core Memories</div>
-    <a href="/">← Back to chat</a>
-  </header>
-  <main>
-    <p>Optional <b>Authorization secret</b> (only if you set <code>AURION_API_SECRET</code>):</p>
-    <input id="auth" placeholder="Bearer secret…" />
-    <p>Core Memories:</p>
-    <textarea id="core"></textarea><br/>
-    <button id="load">Load current</button>
-    <button id="save">Save</button>
-  </main>
+<header>
+  <h1>🔥 Aurion v1 — Core Memory Admin</h1>
+  <div class="muted">Edit durable truths. These sync to <span class="chip">/core</span>.</div>
+</header>
 
-  <script>
-    const core = document.getElementById('core');
-    const auth = document.getElementById('auth');
+<main>
+  <!-- Actions -->
+  <div class="card">
+    <div class="grid2" style="margin-bottom:10px">
+      <button id="refresh" title="Pull latest core from server">↻ Refresh</button>
+      <button id="save" class="primary" title="Save changes to server">💾 Save Core</button>
+    </div>
+    <div class="grid2">
+      <button id="exportBtn" class="ghost" title="Copy JSON to clipboard">⬇︎ Export JSON</button>
+      <button id="importBtn" class="ghost" title="Paste JSON to import">⬆︎ Import JSON</button>
+    </div>
+    <div id="status" class="footerNote"></div>
+  </div>
 
-    function hdrs(){
-      const h = { 'Content-Type':'application/json' };
-      if (auth.value.trim()) h['Authorization'] = `Bearer ${auth.value.trim()}`;
-      return h;
+  <!-- Add new memory -->
+  <div class="card" style="margin-top:12px">
+    <div class="muted" style="margin-bottom:6px;">Add a new memory (single principle, evergreen, factual)</div>
+    <div class="row">
+      <textarea id="newMemory" placeholder="e.g., MISSION: Help Steve reach financial freedom through compounding wins."></textarea>
+      <div class="rowBtns">
+        <button id="add">＋ Add</button>
+        <button id="clearNew" class="ghost">Clear</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- List -->
+  <div class="card" style="margin-top:12px">
+    <div class="muted" style="margin-bottom:6px;">Core memories</div>
+    <div id="list" class="list"></div>
+  </div>
+</main>
+
+<script>
+  // ---- helpers ----
+  const $ = (sel) => document.querySelector(sel);
+  const el = (tag, props={}) => Object.assign(document.createElement(tag), props);
+
+  let core = [];        // array of strings
+  let dirty = false;    // unsaved changes flag
+
+  const setStatus = (msg, ok=true) => {
+    const s = $("#status");
+    s.textContent = msg;
+    s.style.color = ok ? "#9aa3b2" : "#ff8f8f";
+  };
+
+  const markDirty = () => {
+    if (!dirty) {
+      dirty = true;
+      setStatus("Unsaved changes…");
     }
+  };
 
-    document.getElementById('load').onclick = async ()=>{
-      const r = await fetch('/admin/core', { headers: hdrs() });
-      const data = await r.json(); core.value = data.text || '';
-      alert('Loaded.');
-    };
-    document.getElementById('save').onclick = async ()=>{
-      const r = await fetch('/admin/set-core', {
-        method:'POST', headers: hdrs(), body: JSON.stringify({ text: core.value })
-      });
-      const d = await r.json(); alert(d.ok ? `Saved (${d.bytes} bytes).` : 'Failed.');
-    };
+  // ---- fetch core ----
+  async function loadCore() {
+    setStatus("Loading…");
+    const r = await fetch("/core");
+    if (!r.ok) { setStatus("Failed to load /core", false); return; }
+    const j = await r.json();
+    core = Array.isArray(j.core) ? [...j.core] : [];
+    renderList();
+    dirty = false;
+    setStatus("Loaded.");
+  }
 
-    // auto-load once on open
-    document.getElementById('load').click();
-  </script>
+  // ---- save core ----
+  async function saveCore() {
+    setStatus("Saving…");
+    const r = await fetch("/core", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ core })
+    });
+    if (!r.ok) { setStatus("Save failed.", false); return; }
+    dirty = false;
+    setStatus("Saved ✓");
+  }
+
+  // ---- list renderer ----
+  function renderList() {
+    const list = $("#list");
+    list.innerHTML = "";
+    if (core.length === 0) {
+      list.append(el("div", { className:"muted", textContent:"No core memories yet. Add one above." }));
+      return;
+    }
+    core.forEach((text, idx) => {
+      const wrap = el("div", { className: "item" });
+
+      // editable textarea
+      const ta = el("textarea", { value: text });
+      ta.addEventListener("input", () => { core[idx] = ta.value; markDirty(); });
+
+      // per-row buttons
+      const btns = el("div", { className: "rowBtns" });
+
+      const up = el("button", { textContent: "↑" });
+      up.onclick = () => { if (idx>0){ [core[idx-1], core[idx]] = [core[idx], core[idx-1]]; renderList(); markDirty(); } };
+
+      const down = el("button", { textContent: "↓" });
+      down.onclick = () => { if (idx<core.length-1){ [core[idx+1], core[idx]] = [core[idx], core[idx+1]]; renderList(); markDirty(); } };
+
+      const del = el("button", { textContent: "✕", className:"warn" });
+      del.onclick = () => { core.splice(idx,1); renderList(); markDirty(); };
+
+      btns.append(up, down, del);
+
+      wrap.append(ta, btns);
+      list.append(wrap);
+    });
+  }
+
+  // ---- add new memory ----
+  $("#add").onclick = () => {
+    const v = $("#newMemory").value.trim();
+    if (!v) return;
+    core.push(v);
+    $("#newMemory").value = "";
+    renderList();
+    markDirty();
+  };
+  $("#clearNew").onclick = () => { $("#newMemory").value = ""; };
+
+  // ---- export/import ----
+  $("#exportBtn").onclick = async () => {
+    const txt = JSON.stringify({ core }, null, 2);
+    try {
+      await navigator.clipboard.writeText(txt);
+      setStatus("Copied JSON to clipboard ✓");
+    } catch {
+      setStatus("Copy failed—long press to select text below.", false);
+      alert(txt);
+    }
+  };
+
+  $("#importBtn").onclick = () => {
+    const txt = prompt("Paste JSON (expects shape: { core: [...] })");
+    if (!txt) return;
+    try {
+      const j = JSON.parse(txt);
+      if (!Array.isArray(j.core)) throw new Error("Missing .core array");
+      core = [...j.core];
+      renderList();
+      markDirty();
+      setStatus("Imported JSON (unsaved).");
+    } catch (e) {
+      setStatus("Invalid JSON: " + e.message, false);
+    }
+  };
+
+  // ---- top buttons ----
+  $("#refresh").onclick = loadCore;
+  $("#save").onclick = saveCore;
+
+  // warn about unsaved changes
+  window.addEventListener("beforeunload", (e) => {
+    if (!dirty) return;
+    e.preventDefault();
+    e.returnValue = "";
+  });
+
+  // initial
+  loadCore();
+</script>
 </body>
 </html>
