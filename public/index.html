@@ -1,148 +1,106 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
+<meta charset="UTF-8" />
 <title>Aurion v1 — Chat</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-body {
-  background: #0b0d17;
-  color: #f5f5f5;
-  font-family: sans-serif;
-  margin: 0;
-  padding: 0;
-}
-#chat {
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 1rem;
-  overflow-y: auto;
-  height: calc(100vh - 220px);
-}
-.message {
-  margin: 0.5rem 0;
-  padding: 0.6rem 1rem;
-  border-radius: 8px;
-  white-space: pre-wrap;
-}
-.message.user {
-  background: #1f2632;
-  text-align: right;
-}
-.message.assistant {
-  background: #151a24;
-}
-#input-container {
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 1rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-textarea {
-  width: 100%;
-  min-height: 60px;
-  resize: vertical;
-  padding: 0.6rem;
-  font-size: 1rem;
-  border: 1px solid #444;
-  border-radius: 6px;
-  background: #1f2632;
-  color: #f5f5f5;
-}
-button {
-  padding: 0.6rem 1rem;
-  font-size: 1rem;
-  background: #ff8c00;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  color: #fff;
-}
-button:disabled {
-  opacity: 0.5;
-}
-label {
-  font-size: 0.9rem;
-}
-#waiting {
-  font-style: italic;
-  color: #888;
-}
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0d17; color:#eaeef5; font-family: system-ui, sans-serif; }
+  header { padding:14px 16px; font-weight:700; font-size:18px; border-bottom:1px solid #1e2230; }
+  #wrap { max-width:860px; margin:0 auto; }
+  #log { height: calc(100vh - 216px); overflow:auto; padding:16px; }
+  .row { margin:8px 0; padding:12px 14px; border-radius:12px; white-space:pre-wrap; }
+  .me  { background:#1f2632; text-align:right; }
+  .bot { background:#151a24; }
+  #bar { padding:12px 16px; border-top:1px solid #1e2230; display:grid; gap:10px; }
+  #msg { width:100%; min-height:64px; max-height:240px; resize:vertical; padding:10px 12px; border-radius:10px; border:1px solid #334; background:#1f2632; color:#fff; font-size:16px; }
+  #actions { display:flex; gap:10px; align-items:center; }
+  button { background:#ff8c00; color:#fff; border:0; border-radius:10px; padding:10px 16px; font-size:16px; }
+  button:disabled { opacity:.55 }
+  #thinking { font-style:italic; color:#8aa; min-height:1em; }
+  label { font-size:14px; opacity:.8 }
 </style>
 </head>
 <body>
-<div id="chat"></div>
-<div id="input-container">
-  <textarea id="message" placeholder="Speak to the forge…"></textarea>
-  <div style="display:flex; gap:0.5rem; align-items:center;">
-    <button id="send">Send</button>
-    <label><input type="checkbox" id="includeCore"> Include core memories</label>
+<header><div id="wrap">🔥 Aurion v1 — Chat</div></header>
+<div id="wrap">
+  <div id="log"></div>
+</div>
+<div id="bar">
+  <div id="wrap">
+    <textarea id="msg" placeholder="Speak to the forge… (Enter = send, Shift+Enter = newline)"></textarea>
+    <div id="actions">
+      <button id="send">Send</button>
+      <label><input type="checkbox" id="core" checked /> Include core memories</label>
+      <div id="thinking"></div>
+    </div>
   </div>
-  <div id="waiting"></div>
 </div>
 
 <script>
-(function() {
-  const chatEl = document.getElementById('chat');
-  const msgEl = document.getElementById('message');
-  const sendBtn = document.getElementById('send');
-  const waitingEl = document.getElementById('waiting');
-  const includeCoreEl = document.getElementById('includeCore');
+(() => {
+  const log = document.getElementById('log');
+  const msg = document.getElementById('msg');
+  const btn = document.getElementById('send');
+  const thinking = document.getElementById('thinking');
+  const core = document.getElementById('core');
 
-  // Generate or load a unique user ID to keep per‑user memory
-  let userId = localStorage.getItem('aurionUserId');
-  if (!userId) {
-    userId = Math.random().toString(36).slice(2);
-    localStorage.setItem('aurionUserId', userId);
-  }
+  // sticky user id for server-side memory
+  let uid = localStorage.getItem('aurion.uid');
+  if (!uid) { uid = Math.random().toString(36).slice(2); localStorage.setItem('aurion.uid', uid); }
 
-  function addMessage(role, text) {
+  function add(role, text) {
     const div = document.createElement('div');
-    div.className = `message ${role}`;
+    div.className = `row ${role}`;
     div.textContent = text;
-    chatEl.appendChild(div);
-    chatEl.scrollTop = chatEl.scrollHeight;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
   }
 
-  async function sendMessage() {
-    const text = msgEl.value.trim();
+  function dotter() {
+    let n = 0; thinking.textContent = 'Aurion is thinking';
+    const id = setInterval(() => {
+      n = (n + 1) % 4;
+      thinking.textContent = 'Aurion is thinking' + '.'.repeat(n);
+    }, 400);
+    return () => { clearInterval(id); thinking.textContent = ''; };
+  }
+
+  async function send() {
+    const text = msg.value.trim();
     if (!text) return;
+    add('me', text);
+    msg.value = '';
 
-    addMessage('user', text);
-    msgEl.value = '';
-    waitingEl.textContent = 'Aurion is thinking…';
-
+    const stop = dotter();
+    btn.disabled = true;
     try {
-      const res = await fetch('/chat', {
+      const r = await fetch('/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: text,
-          u: userId,
-          core: includeCoreEl.checked
-        })
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify({ message: text, u: uid, core: core.checked })
       });
-      const data = await res.json();
-      if (data.reply) {
-        addMessage('assistant', data.reply);
-      } else if (data.error) {
-        addMessage('assistant', `Error: ${data.error}`);
-      }
-    } catch (err) {
-      addMessage('assistant', `Error: ${err.message}`);
+      const j = await r.json();
+      add('bot', j.reply || `Error: ${j.error || 'unknown'}`);
+    } catch (e) {
+      add('bot', 'Error: ' + (e.message || e));
     } finally {
-      waitingEl.textContent = '';
+      btn.disabled = false;
+      stop();
+      msg.focus();
     }
   }
 
-  sendBtn.addEventListener('click', sendMessage);
-  msgEl.addEventListener('keypress', (e) => {
+  btn.addEventListener('click', send);
+  msg.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
+      e.preventDefault(); send();
     }
   });
+
+  // greet
+  add('bot', 'Aurion: Online. The climb awaits. What shall we forge?');
 })();
 </script>
 </body>
