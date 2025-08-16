@@ -1,218 +1,47 @@
-<!doctype html>
-<html lang="en">
+ <!DOCTYPE html>
+<html>
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Aurion v1 — Dev Console</title>
-  <style>
-    :root{ color-scheme:dark }
-    body{ margin:0; background:#0b0c10; color:#e6e6e6; font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif }
-    header{ padding:14px 16px; background:#11141a; border-bottom:1px solid #232836; display:flex; justify-content:space-between; align-items:center }
-    h1{ margin:0; font-size:18px }
-    main{ max-width:1000px; margin:0 auto; padding:16px }
-    .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap }
-    .card{ background:#12141b; border:1px solid #232836; border-radius:12px; padding:12px; margin:10px 0 }
-    input, textarea{ background:#0f1117; color:#e6e6e6; border:1px solid #2a3142; border-radius:10px; padding:10px 12px }
-    textarea{ width:100%; height:160px }
-    button{ border:1px solid #2a3142; background:#171a22; color:#e6e6e6; padding:8px 12px; border-radius:10px; font-weight:600; cursor:pointer }
-    button.primary{ background:#2663ff; border-color:#3d72ff }
-    .muted{ color:#9aa3b2; font-size:13px }
-    #drop{ border:1px dashed #41506c; border-radius:12px; padding:20px; text-align:center; color:#b9c3d4 }
-    #list{ display:grid; gap:8px }
-    .file{ display:grid; grid-template-columns: 1fr auto; gap:8px; align-items:start; border:1px solid #2a3142; border-radius:10px; padding:8px }
-    pre{ white-space:pre-wrap; background:#0f1117; border:1px solid #2a3142; border-radius:10px; padding:10px; max-height:260px; overflow:auto }
-    a{ color:#8fb5ff; text-decoration:none }
-  </style>
+  <meta charset="UTF-8" />
+  <title>Aurion Developer Console</title>
 </head>
-<body><hr>
-<h2>Paste & Stage File</h2>
-<p>Paste full file contents here and stage directly (phone friendly).</p>
-<form id="pasteForm">
-  <label for="path">Target Path:</label>
-  <input type="text" id="path" value="server.js" style="width: 300px;" />
-  <br><br>
-  <textarea id="content" rows="15" cols="80" placeholder="Paste file contents here..."></textarea>
-  <br><br>
-  <button type="submit">Stage File</button>
-</form>
+<body style="font-family: sans-serif; background: #111; color: #eee;">
+  <h1>🔥 Aurion Developer Console</h1>
+  <p>Stage and update files directly from your browser.</p>
 
-<script>
-document.getElementById("pasteForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const path = document.getElementById("path").value;
-  const content = document.getElementById("content").value;
-  if (!content.trim()) {
-    alert("Paste some content first.");
-    return;
-  }
-
-  const res = await fetch("/dev/stage", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, content })
-  });
-  const j = await res.json();
-  if (j.ok) {
-    alert("Staged: " + path + " (" + j.bytes + " bytes)");
-  } else {
-    alert("Error: " + j.error);
-  }
-});
-</script>
-  <header>
-    <h1>🔥 Aurion v1 — Dev Console</h1>
-    <a href="/">← Back to chat</a>
-  </header>
-  <main>
-    <div class="card">
-      <div class="muted">Drag & drop files to stage safe edits (only allowed paths). Then click <b>Create PR</b>. A backup branch is created automatically.</div>
-      <div id="drop">Drop files here or <input type="file" id="picker" multiple /></div>
-      <div class="row" style="margin-top:8px">
-        <input id="targetPath" placeholder="(Optional) override target path e.g. public/index.html" style="flex:1"/>
-        <button id="refresh">Refresh staged list</button>
-        <button id="clear">Clear stage</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="row">
-        <input id="commitMsg" placeholder="Commit/PR message" style="flex:1" />
-        <button id="createPR" class="primary">Create PR</button>
-      </div>
-      <div id="result" class="muted" style="margin-top:6px"></div>
-    </div>
-
-    <div class="card">
-      <div class="muted">Staged files</div>
-      <div id="list"></div>
-    </div>
-  </main>
+  <hr>
+  <h2>Paste & Stage File</h2>
+  <p>Paste full file contents here and stage directly (phone friendly).</p>
+  <form id="pasteForm">
+    <label for="path">Target Path:</label>
+    <input type="text" id="path" value="server.js" style="width: 300px;" />
+    <br><br>
+    <textarea id="content" rows="15" cols="80" placeholder="Paste file contents here..."></textarea>
+    <br><br>
+    <button type="submit">Stage File</button>
+  </form>
 
   <script>
-    const drop = document.getElementById('drop');
-    const picker = document.getElementById('picker');
-    const list = document.getElementById('list');
-    const targetPath = document.getElementById('targetPath');
-    const result = document.getElementById('result');
-
-    function setStatus(msg, ok=true){ result.textContent = msg; result.style.color = ok ? '#9aa3b2' : '#ff8f8f'; }
-
-    function fileToText(file){
-      return new Promise((resolve,reject)=>{
-        const r = new FileReader();
-        r.onload = () => resolve(String(r.result||""));
-        r.onerror = reject;
-        r.readAsText(file);
-      });
+  document.getElementById("pasteForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const path = document.getElementById("path").value;
+    const content = document.getElementById("content").value;
+    if (!content.trim()) {
+      alert("Paste some content first.");
+      return;
     }
 
-    async function stageFile(name, text){
-      // if user typed a target path, use it; else use file name only (no local dirs)
-      const rel = (targetPath.value.trim() || name.split(/[\\/]/).pop());
-      const r = await fetch('/dev/stage', {
-        method:'POST', headers:{ 'Content-Type':'application/json' },
-        body: JSON.stringify({ path: rel, content: text })
-      });
-      const j = await r.json();
-      if (!j.ok) throw new Error(j.error||'stage failed');
-      return j;
-    }
-
-    function renderList(files){
-      list.innerHTML = '';
-      if (!files || !files.length){
-        list.innerHTML = '<div class="muted">No staged files.</div>';
-        return;
-      }
-      for (const f of files){
-        const row = document.createElement('div'); row.className = 'file';
-        const left = document.createElement('div');
-        left.innerHTML = `<b>${f.path}</b> <span class="muted">(${f.bytes} bytes)</span>`;
-        const right = document.createElement('div');
-        const btn = document.createElement('button'); btn.textContent = 'Remove';
-        btn.onclick = async ()=>{
-          const rr = await fetch('/dev/stage?path=' + encodeURIComponent(f.path), { method:'DELETE' });
-          const jj = await rr.json();
-          if (!jj.ok) return setStatus('Remove failed: '+(jj.error||''), false);
-          loadList();
-        };
-        right.appendChild(btn);
-        row.append(left, right);
-        list.append(row);
-      }
-    }
-
-    async function loadList(){
-      const r = await fetch('/dev/stage/list');
-      const j = await r.json();
-      if (!j.ok) return setStatus('Stage list failed', false);
-      renderList(j.files || []);
-    }
-
-    function preventDefaults(e){ e.preventDefault(); e.stopPropagation(); }
-    ['dragenter','dragover','dragleave','drop'].forEach(ev => drop.addEventListener(ev, preventDefaults, false));
-    drop.addEventListener('drop', async (e)=>{
-      const files = e.dataTransfer.files;
-      if (!files || files.length === 0) return;
-      try {
-        for (const f of files) {
-          const text = await fileToText(f);
-          await stageFile(f.name, text);
-        }
-        setStatus('Staged ' + files.length + ' file(s).');
-        loadList();
-      } catch (err){
-        setStatus('Stage error: ' + err.message, false);
-      }
+    const res = await fetch("/dev/stage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, content })
     });
-
-    picker.addEventListener('change', async (e)=>{
-      const files = e.target.files;
-      if (!files || files.length === 0) return;
-      try {
-        for (const f of files){
-          const text = await fileToText(f);
-          await stageFile(f.name, text);
-        }
-        setStatus('Staged ' + files.length + ' file(s).');
-        loadList();
-      } catch (err){
-        setStatus('Stage error: ' + err.message, false);
-      } finally { picker.value=''; }
-    });
-
-    document.getElementById('refresh').onclick = loadList;
-
-    document.getElementById('clear').onclick = async ()=>{
-      const r = await fetch('/dev/stage/list'); const j = await r.json();
-      if (!j.ok) return;
-      for (const f of (j.files||[])){
-        await fetch('/dev/stage?path=' + encodeURIComponent(f.path), { method:'DELETE' });
-      }
-      loadList();
-      setStatus('Cleared stage.');
-    };
-
-    document.getElementById('createPR').onclick = async ()=>{
-      setStatus('Creating PR…');
-      const msg = document.getElementById('commitMsg').value.trim() || 'Aurion self-edit';
-      const r = await fetch('/dev/commit', {
-        method:'POST', headers:{ 'Content-Type':'application/json' },
-        body: JSON.stringify({ message: msg })
-      });
-      const j = await r.json();
-      if (!j.ok) return setStatus('PR failed: ' + (j.error||''), false);
-      setStatus(`PR opened ✓  Backup: ${j.backup}  |  Feature: ${j.feature}`);
-      // show link
-      const a = document.createElement('a');
-      a.href = j.pr_url; a.textContent = 'Open PR'; a.target = '_blank';
-      result.appendChild(document.createElement('br'));
-      result.appendChild(a);
-      loadList(); // stage was cleared
-    };
-
-    // init
-    loadList();
+    const j = await res.json();
+    if (j.ok) {
+      alert("Staged: " + path + " (" + j.bytes + " bytes)");
+    } else {
+      alert("Error: " + j.error);
+    }
+  });
   </script>
 </body>
 </html>
