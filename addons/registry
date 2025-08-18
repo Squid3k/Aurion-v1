@@ -1,5 +1,0 @@
-{
-  "addons": [
-    { "name": "fileReader", "file": "fileReader.js", "enabled": true }
-  ]
-}

@@ -1,0 +1,12 @@
+[
+  {
+    "name": "hello-world",
+    "entry": "hello-world.js",
+    "version": "1.0.0"
+  },
+  {
+    "name": "file-read",
+    "entry": "fileRead.js",
+    "version": "1.0.0"
+  }
+]
