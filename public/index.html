@@ -145,6 +145,21 @@
       return bubble;
     }
 
+    // ---------- SAFE fetch helper (guards JSON vs HTML) ----------
+    async function postJSON(url, body){
+      const res = await fetch(url, {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify(body)
+      });
+      const ct = (res.headers.get("content-type") || "").toLowerCase();
+      const text = await res.text();
+      if (!ct.includes("application/json")) {
+        throw new Error("Expected JSON, got: " + text.slice(0, 200));
+      }
+      return JSON.parse(text);
+    }
+
     async function send(){
       const text = msg.value.trim();
       if (!text) return;
@@ -156,18 +171,20 @@
       const typing = addTyping();
 
       try{
-        const r = await fetch("/chat", {
-          method:"POST",
-          headers:{ "Content-Type":"application/json" },
-          body: JSON.stringify({
-            message: text,
-            u: uid,
-            core: true // always include core memories
-          })
-        });
-        const j = await r.json();
+        // 🔁 CHANGED: call the correct API and send {user, message}
+        const payload = { user: userInput.value.trim() || "Steve", message: text };
+        const j = await postJSON("/aurion/chat", payload);
+
         const reply = j?.reply || ("(error) " + (j?.error || "Unknown"));
         typing.innerHTML = `<span class="label">Aurion:</span> ${escapeHtml(reply.replace(/^Aurion:\s*/i,""))}`;
+
+        // Optional: show memory hits count if returned
+        if (Array.isArray(j?.related) && j.related.length) {
+          const hint = document.createElement("div");
+          hint.className = "muted";
+          hint.textContent = `(Memory hits: ${j.related.length})`;
+          log.appendChild(hint);
+        }
       }catch(e){
         typing.innerHTML = `<span class="label">Aurion:</span> (error: ${escapeHtml(e.message || String(e))})`;
       }finally{
@@ -187,7 +204,7 @@
       sessionStorage.setItem("aurion.greeted","1");
     }
 
-    // ---------- Core memories modal ----------
+    // ---------- Core memories modal (UI preserved; endpoints TBD) ----------
     coreBtn.addEventListener("click", openCore);
     closeCoreBtn.addEventListener("click", () => modal.classList.remove("open"));
     modal.querySelector(".scrim").addEventListener("click", () => modal.classList.remove("open"));
@@ -198,8 +215,8 @@
         .map(i=>i.value.trim())
         .filter(Boolean);
       try{
-        const r = await fetch("/core", { method:"POST", headers:{'Content-Type':'application/json'}, body:JSON.stringify({ core: values }) });
-        const j = await r.json();
+        // Keep as-is (no removals). Your server can add /core later.
+        const j = await postJSON("/core", { core: values });
         if (j?.ok) showToast("Core memories saved");
         else showToast("Save failed");
       }catch{ showToast("Save failed"); }
