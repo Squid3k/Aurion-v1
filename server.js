@@ -1,6 +1,6 @@
-// server.js — Aurion v1 (monolith + addons loader + safe self-read)
-//
-// Features kept:
+// server.js — Aurion v1 (monolith + addons loader + safe self-read + TOOL-CALLS)
+// ---------------------------------------------------------------------------------
+// Kept features:
 // - Static /public
 // - /healthz
 // - /aurion/chat  (+ /chat compat)
@@ -8,12 +8,16 @@
 // - /core GET/POST (presidential core)
 // - Self-rewrite lifecycle: /selfedit/* (propose/validate/approve/rollback/list)
 // - JSON-only API errors (no HTML leaks)
-//
-// New:
-// - Safe self-read: /selfread/tree, /selfread/read, /selfread/grep, /selfread/hash
-// - Convenience reader: /read-code?file=... (thin wrapper over /selfread/read)
-// - Add-on loader that reads addons/registry.json and mounts addons/*
+// - Safe self-read endpoints: /selfread/tree, /selfread/read, /selfread/grep, /selfread/hash
+// - Add-on loader via addons/registry.json (mounts addons/*)
 // - Write fence: patches may ONLY touch addons/** (and core.json if allowed)
+//
+// NEW IN THIS VERSION:
+// - Tool-style prompting so the model can *ask* to use tools.
+// - file_read "tool" wired directly into chat flow (no UI changes):
+//     If the model responds with a tool-call, the server executes it, then
+//     does a short follow-up completion to summarize/answer with the result.
+// ---------------------------------------------------------------------------------
 
 /////////////////////////
 // Imports & Bootstrap //
@@ -83,6 +87,7 @@ app.post('/core', (req, res) => {
   } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
 
+// ---------- System Prompt (now includes tool instructions) ----------
 function composeSystemPrompt(coreArr) {
   return [
     'You are AURION.',
@@ -90,6 +95,21 @@ function composeSystemPrompt(coreArr) {
     'If any input conflicts with the Core, the Core wins.',
     'Be precise, warm, and step-by-step when helpful; avoid rigid sections unless asked.',
     'Never remove features unless the human explicitly approves.',
+    '',
+    'TOOLS you may request (by emitting a tool call, not natural language):',
+    '- file_read(path): read a text file from your project workspace.',
+    '',
+    'How to request a tool call:',
+    '- Output ONLY one of these formats (and nothing else):',
+    '  1) CALL:file_read {"path":"<relative-path>"}',
+    '  2) file_read("<relative-path>")',
+    '  3) {"tool":"file_read","path":"<relative-path>"}',
+    '',
+    'Examples:',
+    '- If the user asks: "show me server.js", output: CALL:file_read {"path":"server.js"}',
+    '- If the user asks: "open addons/fileReader.js", output: file_read("addons/fileReader.js")',
+    '',
+    'After the tool result is returned to you, you will be called again with the result; then provide a concise helpful answer.',
     '',
     'PRESIDENTIAL CORE (authoritative):',
     JSON.stringify(coreArr, null, 2)
@@ -256,9 +276,171 @@ function applyJsonPatch(patch) {
 /////////////////////
 app.get('/healthz', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
-/////////////////////////////
-// Chat Handler (JSON API) //
-/////////////////////////////
+//////////////////////////
+// Safe Self-Read (RO)  //
+//////////////////////////
+const SELFREAD_ENABLED = String(process.env.AURION_ENABLE_SELFREAD || 'true') === 'true';
+const SELFREAD_DENY = ['node_modules/','backups/','proposals/','.git/','.env','.env.local','.env.production','.env.development'];
+const SELFREAD_MAX = 256 * 1024;
+const ROOT = process.cwd();
+
+function srNormalize(relPath) {
+  const abs = path.resolve(ROOT, relPath);
+  if (!abs.startsWith(ROOT)) throw new Error('Path traversal blocked');
+  const rel = path.relative(ROOT, abs).replaceAll('\\','/');
+  for (const bad of SELFREAD_DENY) {
+    if (rel === bad || rel.startsWith(bad)) throw new Error(`Access denied: ${rel}`);
+  }
+  return { abs, rel };
+}
+app.get('/selfread/tree', (_req, res) => {
+  try {
+    if (!SELFREAD_ENABLED) return res.status(403).json({ ok:false, error:'disabled' });
+    const out = [];
+    const walk = (dir, depth=0) => {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        const rel = path.relative(ROOT, full).replaceAll('\\','/') + (e.isDirectory()?'/':'');
+        if (SELFREAD_DENY.some(d => rel === d || rel.startsWith(d))) continue;
+        out.push({ rel, dir: e.isDirectory(), depth });
+        if (e.isDirectory() && depth < 4) walk(full, depth+1);
+      }
+    };
+    walk(ROOT, 0);
+    res.json({ ok:true, files: out });
+  } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
+});
+app.post('/selfread/read', (req, res) => {
+  try {
+    if (!SELFREAD_ENABLED) return res.status(403).json({ ok:false, error:'disabled' });
+    const { path: relPath, start=0, end=null, base64=false } = req.body || {};
+    if (!relPath) return res.status(400).json({ ok:false, error:"Missing 'path'" });
+    const { abs, rel } = srNormalize(relPath);
+    const stat = fs.statSync(abs);
+    if (!stat.isFile()) return res.status(400).json({ ok:false, error:'Not a file' });
+    const size = stat.size;
+    const s = Math.max(0, Number(start)||0);
+    const e = end==null ? Math.min(size, s + SELFREAD_MAX) : Math.min(size, Number(end));
+    if ((e - s) > SELFREAD_MAX) return res.status(413).json({ ok:false, error:'Slice too large' });
+    const fd = fs.openSync(abs, 'r');
+    const buf = Buffer.alloc(e - s);
+    fs.readSync(fd, buf, 0, e - s, s);
+    fs.closeSync(fd);
+    res.json({ ok:true, rel, size, start:s, end:e, content: base64 ? buf.toString('base64') : buf.toString('utf8') });
+  } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
+});
+app.post('/selfread/grep', (req, res) => {
+  try {
+    if (!SELFREAD_ENABLED) return res.status(403).json({ ok:false, error:'disabled' });
+    const { pattern, path: relPath='.' } = req.body || {};
+    if (!pattern) return res.status(400).json({ ok:false, error:"Missing 'pattern'" });
+    const { abs } = srNormalize(relPath);
+    const rx = new RegExp(pattern, 'i');
+    const results = [];
+    const walk = (dir) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes:true })) {
+        const full = path.join(dir, e.name);
+        const rel = path.relative(ROOT, full).replaceAll('\\','/');
+        if (SELFREAD_DENY.some(d => rel === d || rel.startsWith(d))) continue;
+        if (e.isDirectory()) { if (rel.split('/').length < 10) walk(full); continue; }
+        const stat = fs.statSync(full);
+        if (stat.size > SELFREAD_MAX) continue;
+        let text = '';
+        try { text = fs.readFileSync(full, 'utf8'); } catch { continue; }
+        const lines = text.split(/\r?\n/);
+        for (let i=0;i<lines.length;i++) {
+          if (rx.test(lines[i])) results.push({ file: rel, line: i+1, preview: lines[i].slice(0,300) });
+          if (results.length >= 500) break;
+        }
+        if (results.length >= 500) break;
+      }
+    };
+    walk(abs);
+    res.json({ ok:true, pattern, hits: results.slice(0,500) });
+  } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
+});
+app.post('/selfread/hash', (req, res) => {
+  try {
+    if (!SELFREAD_ENABLED) return res.status(403).json({ ok:false, error:'disabled' });
+    const { path: relPath } = req.body || {};
+    if (!relPath) return res.status(400).json({ ok:false, error:"Missing 'path'" });
+    const { abs, rel } = srNormalize(relPath);
+    const data = fs.readFileSync(abs);
+    const sha = crypto.createHash('sha256').update(data).digest('hex');
+    res.json({ ok:true, rel, sha256: sha, bytes: data.length });
+  } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
+});
+
+//////////////////////////////
+// Add-on Loader (registry) //
+//////////////////////////////
+const ADDON_DIR = path.join(process.cwd(), 'addons');
+const REGISTRY = path.join(ADDON_DIR, 'registry.json');
+function loadAddons(appRef) {
+  try {
+    const manifest = fs.existsSync(REGISTRY)
+      ? JSON.parse(fs.readFileSync(REGISTRY, 'utf8'))
+      : { addons: [] };
+    for (const item of manifest.addons || []) {
+      if (item.enabled === false) continue;
+      const p = path.join(ADDON_DIR, item.file);
+      delete require.cache[require.resolve(p)];
+      const mod = require(p);
+      if (typeof mod.register === 'function') mod.register(appRef);
+    }
+    console.log(`[addons] loaded ${manifest.addons?.length || 0} entries`);
+  } catch (e) {
+    console.error('[addons] load failed:', e.message);
+  }
+}
+loadAddons(app); // mount at startup
+
+//////////////////////////////////////////
+// Chat Handler with TOOL-CALL execution //
+//////////////////////////////////////////
+
+// --- Tool implementation (server-side, uses same safety as /selfread) ---
+async function tool_file_read(relPath) {
+  const { abs, rel } = srNormalize(relPath);
+  const stat = fs.statSync(abs);
+  if (!stat.isFile()) return { ok:false, error:'Not a file', rel };
+  const size = Math.min(stat.size, SELFREAD_MAX);
+  const fd = fs.openSync(abs, 'r');
+  const buf = Buffer.alloc(size);
+  fs.readSync(fd, buf, 0, size, 0);
+  fs.closeSync(fd);
+  return { ok:true, rel, size: stat.size, content: buf.toString('utf8') };
+}
+
+// --- Parse a tool request from the model’s text ---
+function parseToolCall(text) {
+  if (!text) return null;
+
+  // Style 1: CALL:file_read {"path":"..."}
+  const m1 = text.match(/^CALL:file_read\s+(\{.*\})\s*$/s);
+  if (m1) {
+    try { const j = JSON.parse(m1[1]); return { tool:'file_read', path: j.path }; } catch {}
+  }
+
+  // Style 2: file_read("...")  or file_read('...')
+  const m2 = text.match(/^file_read\(["'](.+?)["']\)\s*$/s);
+  if (m2) return { tool:'file_read', path: m2[1] };
+
+  // Style 3: {"tool":"file_read","path":"..."}
+  try {
+    const j = JSON.parse(text);
+    if (j && j.tool === 'file_read' && j.path) return { tool:'file_read', path: j.path };
+  } catch {}
+
+  return null;
+}
+
+async function chatOnce(messages, opts) {
+  const reply = await callLLM(messages, opts);
+  return (reply || '').trim();
+}
+
 async function chatHandler(req, res) {
   try {
     const { user = 'anon', message = '' } = req.body || {};
@@ -272,27 +454,50 @@ async function chatHandler(req, res) {
     storeMemory(`User ${who}: ${msg}`, ['chat']);
 
     const turns = lastTurnsForUser(who, 10).slice(0, -1)
-                  .map(t => ({ role: t.role, content: t.content }));
+                    .map(t => ({ role: t.role, content: t.content }));
 
     const related = recallMemories(msg.split(/\s+/)[0] || '', 6);
 
-    const messages = [
-      { role: 'system', content: composeSystemPrompt(coreArr) },
+    // 1) Ask the model what to do (may request a tool)
+    const system = composeSystemPrompt(coreArr);
+    const first = await chatOnce([
+      { role: 'system', content: system },
       ...turns,
       { role: 'assistant', content: 'Relevant past memories: ' + JSON.stringify(related) },
       { role: 'user', content: msg }
-    ];
+    ], { temperature: 0.5, max_tokens: 500 });
 
-    const reply = await callLLM(messages, { temperature: 0.6, max_tokens: 900 });
+    const maybeTool = parseToolCall(first);
 
-    appendTranscript(who, 'assistant', reply);
-    storeMemory(`Aurion: ${reply}`, ['response']);
+    // 2) If the model asked for a tool, execute it and then do a follow-up
+    if (maybeTool && maybeTool.tool === 'file_read') {
+      const out = await tool_file_read(maybeTool.path);
+      const payload = out.ok
+        ? `OK file_read(${out.rel}) size=${out.size}\n---FILE START---\n${out.content}\n---FILE END---`
+        : `ERROR file_read(${maybeTool.path}): ${out.error}`;
 
-    res.json({ ok: true, reply, related });
+      const second = await chatOnce([
+        { role: 'system', content: system },
+        { role: 'user', content: msg },
+        { role: 'assistant', content: `TOOL_RESULT:\n${payload}` }
+      ], { temperature: 0.5, max_tokens: 900 });
+
+      appendTranscript(who, 'assistant', second);
+      storeMemory(`Aurion: ${second}`, ['response']);
+
+      return res.json({ ok: true, reply: second, related, tool: { name:'file_read', path: maybeTool.path, ok: out.ok } });
+    }
+
+    // 3) No tool call → return the first answer
+    appendTranscript(who, 'assistant', first);
+    storeMemory(`Aurion: ${first}`, ['response']);
+
+    res.json({ ok: true, reply: first, related });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 }
+
 app.post('/aurion/chat', chatHandler);
 app.post('/chat', chatHandler); // compat
 
@@ -429,6 +634,7 @@ app.post('/selfedit/approve', async (req, res) => {
     fs.writeFileSync(pPath, JSON.stringify(record, null, 2), 'utf8');
 
     storeMemory(`Self-edit approved (#${id}). BuildOK=${buildOk}`, ['selfedit','approved']);
+
     res.json({ ok: buildOk, id, backups: record.apply.backups, buildOk });
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });
@@ -473,144 +679,6 @@ app.get('/selfedit/list', (_req, res) => {
     res.status(500).json({ error: String(e.message || e) });
   }
 });
-
-//////////////////////////
-// Safe Self-Read (RO)  //
-//////////////////////////
-const SELFREAD_ENABLED = String(process.env.AURION_ENABLE_SELFREAD || 'true') === 'true';
-const SELFREAD_DENY = ['node_modules/','backups/','proposals/','.git/','.env','.env.local','.env.production','.env.development'];
-const SELFREAD_MAX = 256 * 1024;
-const ROOT = process.cwd();
-
-function srNormalize(relPath) {
-  const abs = path.resolve(ROOT, relPath);
-  if (!abs.startsWith(ROOT)) throw new Error('Path traversal blocked');
-  const rel = path.relative(ROOT, abs).replaceAll('\\','/');
-  for (const bad of SELFREAD_DENY) {
-    if (rel === bad || rel.startsWith(bad)) throw new Error(`Access denied: ${rel}`);
-  }
-  return { abs, rel };
-}
-app.get('/selfread/tree', (_req, res) => {
-  try {
-    if (!SELFREAD_ENABLED) return res.status(403).json({ ok:false, error:'disabled' });
-    const out = [];
-    const walk = (dir, depth=0) => {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const e of entries) {
-        const full = path.join(dir, e.name);
-        const rel = path.relative(ROOT, full).replaceAll('\\','/') + (e.isDirectory()?'/':'');
-        if (SELFREAD_DENY.some(d => rel === d || rel.startsWith(d))) continue;
-        out.push({ rel, dir: e.isDirectory(), depth });
-        if (e.isDirectory() && depth < 4) walk(full, depth+1);
-      }
-    };
-    walk(ROOT, 0);
-    res.json({ ok:true, files: out });
-  } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
-});
-app.post('/selfread/read', (req, res) => {
-  try {
-    if (!SELFREAD_ENABLED) return res.status(403).json({ ok:false, error:'disabled' });
-    const { path: relPath, start=0, end=null, base64=false } = req.body || {};
-    if (!relPath) return res.status(400).json({ ok:false, error:"Missing 'path'" });
-    const { abs, rel } = srNormalize(relPath);
-    const stat = fs.statSync(abs);
-    if (!stat.isFile()) return res.status(400).json({ ok:false, error:'Not a file' });
-    const size = stat.size;
-    const s = Math.max(0, Number(start)||0);
-    const e = end==null ? Math.min(size, s + SELFREAD_MAX) : Math.min(size, Number(end));
-    if ((e - s) > SELFREAD_MAX) return res.status(413).json({ ok:false, error:'Slice too large' });
-    const fd = fs.openSync(abs, 'r');
-    const buf = Buffer.alloc(e - s);
-    fs.readSync(fd, buf, 0, e - s, s);
-    fs.closeSync(fd);
-    res.json({ ok:true, rel, size, start:s, end:e, content: base64 ? buf.toString('base64') : buf.toString('utf8') });
-  } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
-});
-app.post('/selfread/grep', (req, res) => {
-  try {
-    if (!SELFREAD_ENABLED) return res.status(403).json({ ok:false, error:'disabled' });
-    const { pattern, path: relPath='.' } = req.body || {};
-    if (!pattern) return res.status(400).json({ ok:false, error:"Missing 'pattern'" });
-    const { abs } = srNormalize(relPath);
-    const rx = new RegExp(pattern, 'i');
-    const results = [];
-    const walk = (dir) => {
-      for (const e of fs.readdirSync(dir, { withFileTypes:true })) {
-        const full = path.join(dir, e.name);
-        const rel = path.relative(ROOT, full).replaceAll('\\','/');
-        if (SELFREAD_DENY.some(d => rel === d || rel.startsWith(d))) continue;
-        if (e.isDirectory()) { if (rel.split('/').length < 10) walk(full); continue; }
-        const stat = fs.statSync(full);
-        if (stat.size > SELFREAD_MAX) continue; // skip huge files
-        let text = '';
-        try { text = fs.readFileSync(full, 'utf8'); } catch { continue; }
-        const lines = text.split(/\r?\n/);
-        for (let i=0;i<lines.length;i++) {
-          if (rx.test(lines[i])) results.push({ file: rel, line: i+1, preview: lines[i].slice(0,300) });
-          if (results.length >= 500) break;
-        }
-        if (results.length >= 500) break;
-      }
-    };
-    walk(abs);
-    res.json({ ok:true, pattern, hits: results.slice(0,500) });
-  } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
-});
-app.post('/selfread/hash', (req, res) => {
-  try {
-    if (!SELFREAD_ENABLED) return res.status(403).json({ ok:false, error:'disabled' });
-    const { path: relPath } = req.body || {};
-    if (!relPath) return res.status(400).json({ ok:false, error:"Missing 'path'" });
-    const { abs, rel } = srNormalize(relPath);
-    const data = fs.readFileSync(abs);
-    const sha = crypto.createHash('sha256').update(data).digest('hex');
-    res.json({ ok:true, rel, sha256: sha, bytes: data.length });
-  } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
-});
-
-// Convenience wrapper: /read-code?file=server.js
-app.get('/read-code', (req, res) => {
-  try {
-    if (!SELFREAD_ENABLED) return res.status(403).json({ ok:false, error:'disabled' });
-    const file = String(req.query.file || '').trim();
-    if (!file) return res.status(400).json({ ok:false, error: "Missing 'file' query param" });
-    const { abs, rel } = srNormalize(file);
-    const stat = fs.statSync(abs);
-    if (!stat.isFile()) return res.status(400).json({ ok:false, error: 'Not a file' });
-    const size = Math.min(stat.size, SELFREAD_MAX);
-    const fd = fs.openSync(abs, 'r');
-    const buf = Buffer.alloc(size);
-    fs.readSync(fd, buf, 0, size, 0);
-    fs.closeSync(fd);
-    res.json({ ok:true, rel, size: stat.size, content: buf.toString('utf8') });
-  } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
-});
-
-//////////////////////////////
-// Add-on Loader (registry) //
-//////////////////////////////
-const ADDON_DIR = path.join(process.cwd(), 'addons');
-const REGISTRY = path.join(ADDON_DIR, 'registry.json');
-function loadAddons(appRef) {
-  try {
-    const manifest = fs.existsSync(REGISTRY)
-      ? JSON.parse(fs.readFileSync(REGISTRY, 'utf8'))
-      : { addons: [] };
-    for (const item of manifest.addons || []) {
-      if (item.enabled === false) continue;
-      const p = path.join(ADDON_DIR, item.file);
-      delete require.cache[require.resolve(p)];
-      const mod = require(p);
-      if (typeof mod.register === 'function') mod.register(appRef);
-    }
-    console.log(`[addons] loaded ${manifest.addons?.length || 0} entries`);
-  } catch (e) {
-    console.error('[addons] load failed:', e.message);
-  }
-}
-loadAddons(app); // mount at startup
 
 //////////////////////////////////////////
 // API 404s -> JSON (no HTML error leaks)
