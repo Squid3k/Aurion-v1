@@ -5,11 +5,12 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "build": "echo \"(optional) build step\" && exit 0"
+    "dev": "node server.js",
+    "build": "npm --prefix client ci && npm --prefix client run build"
   },
   "dependencies": {
+    "cors": "^2.8.5",
     "express": "^4.19.2",
-    "openai": "^4.55.0",
-    "cors": "^2.8.5"
+    "openai": "^4.55.0"
   }
 }
