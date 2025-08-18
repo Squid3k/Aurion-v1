@@ -105,13 +105,15 @@
     const addCoreBtn = $("#addCore"), saveCoreBtn = $("#saveCore"), closeCoreBtn = $("#closeCore");
     const toast = $("#toast");
 
+    const API_CHAT = "/aurion/chat";   // canonical route
+    const API_HEALTH = "/healthz";
+
     const uid = (() => {
       let id = localStorage.getItem("aurion.uid");
       if (!id) { id = Math.random().toString(36).slice(2); localStorage.setItem("aurion.uid", id); }
       return id;
     })();
 
-    // keep user's display name
     userInput.value = localStorage.getItem("aurion.user") || "steve";
     userInput.addEventListener("input", () => localStorage.setItem("aurion.user", userInput.value.trim()));
 
@@ -120,50 +122,59 @@
       setTimeout(()=>toast.classList.remove("show"), ms);
     }
 
-    function addBubble(who, text){
+    function addBubble(who, html){
       const row = document.createElement("div");
       row.className = who === "me" ? "row me" : "row bot";
       const b = document.createElement("div");
       b.className = "bubble";
-      b.innerHTML = who === "me"
-        ? `<span class="label">You:</span> ${escapeHtml(text)}`
-        : `<span class="label">Aurion:</span> ${text}`;
+      b.innerHTML = html;
       row.appendChild(b);
       log.appendChild(row);
       log.scrollTop = log.scrollHeight;
-      return b; // return bubble node (so we can mutate for typing)
+      return b;
     }
 
     function escapeHtml(s){
       return s.replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
 
-    // typing indicator bubble (animated dots)
     function addTyping(){
-      const bubble = addBubble("bot",
-        `<span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>`);
-      return bubble;
+      return addBubble("bot",
+        `<span class="label">Aurion:</span> <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>`);
     }
 
-    // ---------- SAFE fetch helper (guards JSON vs HTML) ----------
-    async function postJSON(url, body){
-      const res = await fetch(url, {
-        method:"POST",
-        headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify(body)
-      });
-      const ct = (res.headers.get("content-type") || "").toLowerCase();
-      const text = await res.text();
-      if (!ct.includes("application/json")) {
-        throw new Error("Expected JSON, got: " + text.slice(0, 200));
+    // ---------- Warm server (mitigates first-call 502) ----------
+    (async () => { try { await fetch(API_HEALTH, { cache: "no-store" }); } catch {} })();
+
+    // ---------- POST helper with retry + JSON guard ----------
+    async function postJSONWithRetry(url, body, { retries = 2, delayMs = 1200 } = {}) {
+      let lastErr;
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const ct = (res.headers.get("content-type") || "").toLowerCase();
+          const text = await res.text();
+          if (!ct.includes("application/json")) {
+            throw new Error("Expected JSON, got: " + text.slice(0, 200));
+          }
+          return JSON.parse(text);
+        } catch (err) {
+          lastErr = err;
+          if (attempt < retries) await new Promise(r => setTimeout(r, delayMs));
+        }
       }
-      return JSON.parse(text);
+      throw lastErr || new Error("Request failed");
     }
 
     async function send(){
       const text = msg.value.trim();
       if (!text) return;
-      addBubble("me", text);
+
+      addBubble("me", `<span class="label">You:</span> ${escapeHtml(text)}`);
       msg.value = "";
       msg.focus();
 
@@ -171,14 +182,12 @@
       const typing = addTyping();
 
       try{
-        // 🔁 CHANGED: call the correct API and send {user, message}
-        const payload = { user: userInput.value.trim() || "Steve", message: text };
-        const j = await postJSON("/aurion/chat", payload);
+        const payload = { user: (userInput.value.trim() || "Steve"), message: text };
+        const j = await postJSONWithRetry(API_CHAT, payload, { retries: 2, delayMs: 1200 });
 
         const reply = j?.reply || ("(error) " + (j?.error || "Unknown"));
         typing.innerHTML = `<span class="label">Aurion:</span> ${escapeHtml(reply.replace(/^Aurion:\s*/i,""))}`;
 
-        // Optional: show memory hits count if returned
         if (Array.isArray(j?.related) && j.related.length) {
           const hint = document.createElement("div");
           hint.className = "muted";
@@ -198,13 +207,12 @@
       if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); }
     });
 
-    // greet once
     if (!sessionStorage.getItem("aurion.greeted")){
-      addBubble("bot","Aurion: Online. The climb awaits. What shall we forge?");
+      addBubble("bot","<span class='label'>Aurion:</span> Online. The climb awaits. What shall we forge?");
       sessionStorage.setItem("aurion.greeted","1");
     }
 
-    // ---------- Core memories modal (UI preserved; endpoints TBD) ----------
+    // ---------- Core memories UI (routes optional) ----------
     coreBtn.addEventListener("click", openCore);
     closeCoreBtn.addEventListener("click", () => modal.classList.remove("open"));
     modal.querySelector(".scrim").addEventListener("click", () => modal.classList.remove("open"));
@@ -212,11 +220,10 @@
 
     saveCoreBtn.addEventListener("click", async () => {
       const values = Array.from(coreList.querySelectorAll("input"))
-        .map(i=>i.value.trim())
-        .filter(Boolean);
+        .map(i=>i.value.trim()).filter(Boolean);
       try{
-        // Keep as-is (no removals). Your server can add /core later.
-        const j = await postJSON("/core", { core: values });
+        const r = await fetch("/core", { method:"POST", headers:{'Content-Type':'application/json'}, body:JSON.stringify({ core: values }) });
+        const j = await r.json();
         if (j?.ok) showToast("Core memories saved");
         else showToast("Save failed");
       }catch{ showToast("Save failed"); }
