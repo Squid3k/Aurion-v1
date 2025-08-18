@@ -2,27 +2,52 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>🔥 Aurion v1 — Chat</title>
   <style>
     :root{
       --bg:#0b0f15; --panel:#0f1520; --bubble-me:#174173; --bubble-bot:#0f1b2d;
       --text:#e6edf3; --muted:#93a4b7; --accent:#66b2ff; --ok:#41d167; --warn:#ffb454;
       --ring:#1f2a44; --btn:#183558; --btn-hover:#1c406a;
+      --header-h:56px;           /* approximate header height */
+      --composer-h:120px;        /* approximate composer block */
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
     }
     *{box-sizing:border-box}
-    body{margin:0;background:var(--bg);color:var(--text);font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif}
-    header{display:flex;align-items:center;gap:.5rem;padding:14px 16px;border-bottom:1px solid var(--ring);position:sticky;top:0;background:linear-gradient(to bottom,var(--bg),#0b0f15cc)}
+    html,body{height:100%}
+    body{
+      margin:0;background:var(--bg);color:var(--text);
+      font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif;
+      padding-bottom:var(--safe-bottom);
+    }
+
+    header{
+      height:var(--header-h);
+      display:flex;align-items:center;gap:.5rem;
+      padding:14px 16px;border-bottom:1px solid var(--ring);
+      position:sticky;top:0;z-index:10;
+      background:linear-gradient(to bottom,var(--bg),#0b0f15cc)
+    }
     header h1{margin:0;font-size:18px;font-weight:700}
     .spacer{flex:1}
-    .pill{display:flex;align-items:center;gap:.5rem;background:var(--panel);border:1px solid var(--ring);padding:6px 10px;border-radius:999px}
+    .pill{display:flex;align-items:center;gap:.5rem;background:var(--panel);
+      border:1px solid var(--ring);padding:6px 10px;border-radius:999px}
     .pill input{background:transparent;border:0;color:var(--text);outline:none;width:120px}
     .btn{background:var(--btn);border:1px solid var(--ring);color:var(--text);padding:8px 12px;border-radius:10px;cursor:pointer}
     .btn:hover{background:var(--btn-hover)}
     .btn:disabled{opacity:.6;cursor:not-allowed}
     .ghost{background:transparent;border:1px solid var(--ring)}
+
     .wrap{max-width:900px;margin:0 auto;padding:10px 14px}
-    #log{display:flex;flex-direction:column;gap:10px;padding:8px 0;min-height:58vh;overflow:auto}
+    /* Chat log is the scrolling region */
+    #log{
+      display:flex;flex-direction:column;gap:10px;padding:8px 0;
+      overflow:auto;                  /* crucial */
+      -webkit-overflow-scrolling:touch;
+      max-height:calc(100vh - var(--header-h) - var(--composer-h) - var(--safe-bottom) - 12px);
+      scroll-behavior:smooth;         /* smooth when possible */
+    }
+
     .row{display:flex}
     .me{justify-content:flex-end}
     .bot{justify-content:flex-start}
@@ -31,16 +56,24 @@
     .bot .bubble{background:var(--bubble-bot)}
     .label{font-weight:700;margin-right:6px}
     .muted{color:var(--muted);font-size:12px}
-    .composer{position:sticky;bottom:0;background:linear-gradient(to top,var(--bg),#0b0f1500 50%);padding:10px 0 14px;border-top:1px solid var(--ring)}
+
+    .composer{
+      position:sticky;bottom:0;z-index:5;
+      background:linear-gradient(to top,var(--bg),#0b0f1500 50%);
+      padding:10px 0 calc(14px + var(--safe-bottom));border-top:1px solid var(--ring);
+      min-height:var(--composer-h);
+    }
     .composer .box{display:flex;gap:10px;align-items:flex-end}
     textarea{flex:1;min-height:56px;max-height:240px;resize:vertical;background:var(--panel);color:var(--text);border:1px solid var(--ring);border-radius:14px;padding:12px}
     .hint{margin-top:6px;color:var(--muted);font-size:12px;text-align:center}
+
     /* typing dots */
     .dots{display:inline-block;min-width:28px}
     .dot{display:inline-block;width:6px;height:6px;margin:0 2px;background:#9bb6d1;border-radius:50%;animation:fade 1.2s infinite}
     .dot:nth-child(2){animation-delay:.2s}.dot:nth-child(3){animation-delay:.4s}
     @keyframes fade{0%,80%,100%{opacity:.25}40%{opacity:1}}
-    /* modal */
+
+    /* modal (unchanged) */
     .modal{position:fixed;inset:0;display:none;align-items:flex-end;justify-content:center}
     .modal.open{display:flex}
     .scrim{position:absolute;inset:0;background:#0008}
@@ -106,6 +139,19 @@
     const addCoreBtn = $("#addCore"), saveCoreBtn = $("#saveCore"), closeCoreBtn = $("#closeCore");
     const toast = $("#toast");
 
+    // Smooth, reliable scroll to newest message (mobile-safe)
+    function scrollToBottom() {
+      // defer until DOM paints so height is correct
+      requestAnimationFrame(() => {
+        const last = log.lastElementChild;
+        if (last) {
+          last.scrollIntoView({ block: 'end' });
+        } else {
+          log.scrollTop = log.scrollHeight;
+        }
+      });
+    }
+
     const uid = (() => {
       let id = localStorage.getItem("aurion.uid");
       if (!id) { id = Math.random().toString(36).slice(2); localStorage.setItem("aurion.uid", id); }
@@ -121,11 +167,6 @@
       setTimeout(()=>toast.classList.remove("show"), ms);
     }
 
-    function autoScroll(){
-      // always stick to the bottom
-      log.scrollTop = log.scrollHeight;
-    }
-
     function addBubble(who, text){
       const row = document.createElement("div");
       row.className = who === "me" ? "row me" : "row bot";
@@ -136,7 +177,7 @@
         : `<span class="label">Aurion:</span> ${text}`;
       row.appendChild(b);
       log.appendChild(row);
-      autoScroll();
+      scrollToBottom();
       return b; // return bubble node (so we can mutate for typing)
     }
 
@@ -148,39 +189,23 @@
     function addTyping(){
       const bubble = addBubble("bot",
         `<span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>`);
+      scrollToBottom();
       return bubble;
     }
 
-    // ---------- robust POST helper with retry ----------
-    async function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
-
-    async function postJSONWithRetry(url, body, {retries=3, backoff=400}={}){
-      let lastErr;
-      for (let i=0;i<=retries;i++){
-        try{
-          const res = await fetch(url, {
-            method:"POST",
-            headers:{ "Content-Type":"application/json" },
-            body: JSON.stringify(body)
-          });
-
-          const ct = (res.headers.get("content-type") || "").toLowerCase();
-          const txt = await res.text();
-
-          // Render 502s come back as HTML. Guard for that.
-          if (!ct.includes("application/json")) {
-            if (i < retries) { await sleep(backoff * (i+1)); continue; }
-            throw new Error("Service waking (non-JSON). Try again.");
-          }
-
-          // Parse JSON safely
-          return JSON.parse(txt);
-        }catch(err){
-          lastErr = err;
-          if (i < retries) { await sleep(backoff * (i+1)); continue; }
-        }
+    // ---------- SAFE fetch helper (guards JSON vs HTML) ----------
+    async function postJSON(url, body){
+      const res = await fetch(url, {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify(body)
+      });
+      const ct = (res.headers.get("content-type") || "").toLowerCase();
+      const text = await res.text();
+      if (!ct.includes("application/json")) {
+        throw new Error("Expected JSON, got: " + text.slice(0, 200));
       }
-      throw lastErr || new Error("Request failed");
+      return JSON.parse(text);
     }
 
     async function send(){
@@ -194,18 +219,14 @@
       const typing = addTyping();
 
       try{
-        // warm the server once per session to reduce 502s on the first send
-        if (!sessionStorage.getItem("aurion.warmed")){
-          fetch("/healthz").catch(()=>{});
-          sessionStorage.setItem("aurion.warmed","1");
-        }
-
-        const payload = { user: (userInput.value.trim() || "Steve"), message: text };
-        const j = await postJSONWithRetry("/aurion/chat", payload, {retries:3, backoff:500});
+        // API: send {user, message}; server persists/recalls memory
+        const payload = { user: userInput.value.trim() || "Steve", message: text };
+        const j = await postJSON("/aurion/chat", payload);
 
         const reply = j?.reply || ("(error) " + (j?.error || "Unknown"));
         typing.innerHTML = `<span class="label">Aurion:</span> ${escapeHtml(reply.replace(/^Aurion:\s*/i,""))}`;
 
+        // Optional: show memory hits count if returned
         if (Array.isArray(j?.related) && j.related.length) {
           const hint = document.createElement("div");
           hint.className = "muted";
@@ -216,7 +237,7 @@
         typing.innerHTML = `<span class="label">Aurion:</span> (error: ${escapeHtml(e.message || String(e))})`;
       }finally{
         sendBtn.disabled = false;
-        autoScroll();
+        scrollToBottom();
       }
     }
 
@@ -225,13 +246,11 @@
       if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); }
     });
 
-    window.addEventListener("resize", autoScroll);
-    modal.addEventListener("transitionend", autoScroll);
-
     // greet once
     if (!sessionStorage.getItem("aurion.greeted")){
       addBubble("bot","Aurion: Online. The climb awaits. What shall we forge?");
       sessionStorage.setItem("aurion.greeted","1");
+      scrollToBottom();
     }
 
     // ---------- Core memories modal (UI preserved) ----------
@@ -245,7 +264,7 @@
         .map(i=>i.value.trim())
         .filter(Boolean);
       try{
-        const j = await postJSONWithRetry("/core", { core: values });
+        const j = await postJSON("/core", { core: values });
         if (j?.ok) showToast("Core memories saved");
         else showToast("Save failed");
       }catch{ showToast("Save failed"); }
@@ -263,14 +282,13 @@
       }catch{
         addCoreRow("");
       }
-      autoScroll();
     }
 
     function addCoreRow(value){
       const row = document.createElement("div");
       row.className = "rowline";
       row.innerHTML = `
-        <input type="text" value="${escapeHtml(value)}" placeholder="e.g. Aurion was forged on Aug 15, 2025 by Steven Reyher."/>
+        <input type="text" value="${escapeHtml(value)}" placeholder="e.g. Aurion was forged on Aug 15, 2025 by Steve Reyher."/>
         <button class="btn ghost remove">Remove</button>`;
       row.querySelector(".remove").addEventListener("click", ()=> row.remove());
       coreList.appendChild(row);
