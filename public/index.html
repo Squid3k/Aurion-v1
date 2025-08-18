@@ -10,7 +10,8 @@
       --text:#e6edf3; --muted:#93a4b7; --accent:#66b2ff; --ok:#41d167; --warn:#ffb454;
       --ring:#1f2a44; --btn:#183558; --btn-hover:#1c406a;
     }
-    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif}
     header{display:flex;align-items:center;gap:.5rem;padding:14px 16px;border-bottom:1px solid var(--ring);position:sticky;top:0;background:linear-gradient(to bottom,var(--bg),#0b0f15cc)}
     header h1{margin:0;font-size:18px;font-weight:700}
     .spacer{flex:1}
@@ -21,7 +22,7 @@
     .btn:disabled{opacity:.6;cursor:not-allowed}
     .ghost{background:transparent;border:1px solid var(--ring)}
     .wrap{max-width:900px;margin:0 auto;padding:10px 14px}
-    #log{display:flex;flex-direction:column;gap:10px;padding:8px 0;min-height:58vh}
+    #log{display:flex;flex-direction:column;gap:10px;padding:8px 0;min-height:58vh;overflow:auto}
     .row{display:flex}
     .me{justify-content:flex-end}
     .bot{justify-content:flex-start}
@@ -105,15 +106,13 @@
     const addCoreBtn = $("#addCore"), saveCoreBtn = $("#saveCore"), closeCoreBtn = $("#closeCore");
     const toast = $("#toast");
 
-    const API_CHAT = "/aurion/chat";   // canonical route
-    const API_HEALTH = "/healthz";
-
     const uid = (() => {
       let id = localStorage.getItem("aurion.uid");
       if (!id) { id = Math.random().toString(36).slice(2); localStorage.setItem("aurion.uid", id); }
       return id;
     })();
 
+    // keep user's display name
     userInput.value = localStorage.getItem("aurion.user") || "steve";
     userInput.addEventListener("input", () => localStorage.setItem("aurion.user", userInput.value.trim()));
 
@@ -122,49 +121,63 @@
       setTimeout(()=>toast.classList.remove("show"), ms);
     }
 
-    function addBubble(who, html){
+    function autoScroll(){
+      // always stick to the bottom
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function addBubble(who, text){
       const row = document.createElement("div");
       row.className = who === "me" ? "row me" : "row bot";
       const b = document.createElement("div");
       b.className = "bubble";
-      b.innerHTML = html;
+      b.innerHTML = who === "me"
+        ? `<span class="label">You:</span> ${escapeHtml(text)}`
+        : `<span class="label">Aurion:</span> ${text}`;
       row.appendChild(b);
       log.appendChild(row);
-      log.scrollTop = log.scrollHeight;
-      return b;
+      autoScroll();
+      return b; // return bubble node (so we can mutate for typing)
     }
 
     function escapeHtml(s){
       return s.replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
 
+    // typing indicator bubble (animated dots)
     function addTyping(){
-      return addBubble("bot",
-        `<span class="label">Aurion:</span> <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>`);
+      const bubble = addBubble("bot",
+        `<span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>`);
+      return bubble;
     }
 
-    // ---------- Warm server (mitigates first-call 502) ----------
-    (async () => { try { await fetch(API_HEALTH, { cache: "no-store" }); } catch {} })();
+    // ---------- robust POST helper with retry ----------
+    async function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
-    // ---------- POST helper with retry + JSON guard ----------
-    async function postJSONWithRetry(url, body, { retries = 2, delayMs = 1200 } = {}) {
+    async function postJSONWithRetry(url, body, {retries=3, backoff=400}={}){
       let lastErr;
-      for (let attempt = 0; attempt <= retries; attempt++) {
-        try {
+      for (let i=0;i<=retries;i++){
+        try{
           const res = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
+            method:"POST",
+            headers:{ "Content-Type":"application/json" },
             body: JSON.stringify(body)
           });
+
           const ct = (res.headers.get("content-type") || "").toLowerCase();
-          const text = await res.text();
+          const txt = await res.text();
+
+          // Render 502s come back as HTML. Guard for that.
           if (!ct.includes("application/json")) {
-            throw new Error("Expected JSON, got: " + text.slice(0, 200));
+            if (i < retries) { await sleep(backoff * (i+1)); continue; }
+            throw new Error("Service waking (non-JSON). Try again.");
           }
-          return JSON.parse(text);
-        } catch (err) {
+
+          // Parse JSON safely
+          return JSON.parse(txt);
+        }catch(err){
           lastErr = err;
-          if (attempt < retries) await new Promise(r => setTimeout(r, delayMs));
+          if (i < retries) { await sleep(backoff * (i+1)); continue; }
         }
       }
       throw lastErr || new Error("Request failed");
@@ -173,8 +186,7 @@
     async function send(){
       const text = msg.value.trim();
       if (!text) return;
-
-      addBubble("me", `<span class="label">You:</span> ${escapeHtml(text)}`);
+      addBubble("me", text);
       msg.value = "";
       msg.focus();
 
@@ -182,8 +194,14 @@
       const typing = addTyping();
 
       try{
+        // warm the server once per session to reduce 502s on the first send
+        if (!sessionStorage.getItem("aurion.warmed")){
+          fetch("/healthz").catch(()=>{});
+          sessionStorage.setItem("aurion.warmed","1");
+        }
+
         const payload = { user: (userInput.value.trim() || "Steve"), message: text };
-        const j = await postJSONWithRetry(API_CHAT, payload, { retries: 2, delayMs: 1200 });
+        const j = await postJSONWithRetry("/aurion/chat", payload, {retries:3, backoff:500});
 
         const reply = j?.reply || ("(error) " + (j?.error || "Unknown"));
         typing.innerHTML = `<span class="label">Aurion:</span> ${escapeHtml(reply.replace(/^Aurion:\s*/i,""))}`;
@@ -198,7 +216,7 @@
         typing.innerHTML = `<span class="label">Aurion:</span> (error: ${escapeHtml(e.message || String(e))})`;
       }finally{
         sendBtn.disabled = false;
-        log.scrollTop = log.scrollHeight;
+        autoScroll();
       }
     }
 
@@ -207,12 +225,16 @@
       if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); }
     });
 
+    window.addEventListener("resize", autoScroll);
+    modal.addEventListener("transitionend", autoScroll);
+
+    // greet once
     if (!sessionStorage.getItem("aurion.greeted")){
-      addBubble("bot","<span class='label'>Aurion:</span> Online. The climb awaits. What shall we forge?");
+      addBubble("bot","Aurion: Online. The climb awaits. What shall we forge?");
       sessionStorage.setItem("aurion.greeted","1");
     }
 
-    // ---------- Core memories UI (routes optional) ----------
+    // ---------- Core memories modal (UI preserved) ----------
     coreBtn.addEventListener("click", openCore);
     closeCoreBtn.addEventListener("click", () => modal.classList.remove("open"));
     modal.querySelector(".scrim").addEventListener("click", () => modal.classList.remove("open"));
@@ -220,10 +242,10 @@
 
     saveCoreBtn.addEventListener("click", async () => {
       const values = Array.from(coreList.querySelectorAll("input"))
-        .map(i=>i.value.trim()).filter(Boolean);
+        .map(i=>i.value.trim())
+        .filter(Boolean);
       try{
-        const r = await fetch("/core", { method:"POST", headers:{'Content-Type':'application/json'}, body:JSON.stringify({ core: values }) });
-        const j = await r.json();
+        const j = await postJSONWithRetry("/core", { core: values });
         if (j?.ok) showToast("Core memories saved");
         else showToast("Save failed");
       }catch{ showToast("Save failed"); }
@@ -241,13 +263,14 @@
       }catch{
         addCoreRow("");
       }
+      autoScroll();
     }
 
     function addCoreRow(value){
       const row = document.createElement("div");
       row.className = "rowline";
       row.innerHTML = `
-        <input type="text" value="${escapeHtml(value)}" placeholder="e.g. Aurion was forged on Aug 15, 2025 by Steve Reyher."/>
+        <input type="text" value="${escapeHtml(value)}" placeholder="e.g. Aurion was forged on Aug 15, 2025 by Steven Reyher."/>
         <button class="btn ghost remove">Remove</button>`;
       row.querySelector(".remove").addEventListener("click", ()=> row.remove());
       coreList.appendChild(row);
