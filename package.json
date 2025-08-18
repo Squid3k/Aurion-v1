@@ -1,15 +1,15 @@
 {
   "name": "aurion-v1",
   "version": "1.0.0",
-  "description": "Aurion v1 — personal AI guide",
+  "description": "Aurion server",
   "main": "server.js",
-  "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "build": "echo \"(optional) build step\" && exit 0"
   },
   "dependencies": {
-    "express": "^4.18.2",
+    "express": "^4.19.2",
+    "openai": "^4.55.0",
     "cors": "^2.8.5"
-  },
-  "engines": { "node": ">=18.x" }
+  }
 }
