@@ -1,3 +1,17 @@
+// Top of server.js (keep all your existing code)
+const { installAurionAddons } = require('./aurion_addons');
+
+// ... your existing server setup ...
+// Example:
+const express = require('express');
+const app = express();
+
+// ✅ Install Aurion add-ons without removing any existing routes
+installAurionAddons(app);
+
+// (keep your existing routes/endpoints intact)
+
+// Start server (keep your existing listen)
 import fs from "fs";
 import path from "path";
 import express from "express";
