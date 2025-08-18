@@ -542,7 +542,7 @@ app.post('/selfread/grep', (req, res) => {
         if (SELFREAD_DENY.some(d => rel === d || rel.startsWith(d))) continue;
         if (e.isDirectory()) { if (rel.split('/').length < 10) walk(full); continue; }
         const stat = fs.statSync(full);
-        if (stat.size > SELFREAD_MAX) continue;
+        if (stat.size > SELFREAD_MAX) continue; // skip huge files
         let text = '';
         try { text = fs.readFileSync(full, 'utf8'); } catch { continue; }
         const lines = text.split(/\r?\n/);
