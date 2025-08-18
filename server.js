@@ -1,17 +1,4 @@
 // server.js — Aurion v1 (additive, safe, persistent)
-//
-// Keeps ALL existing features and adds:
-// - Per-user durable recall (memories + small profile facts) on Render disk
-// - Cleaner prompts (no boilerplate sections in replies)
-// - Inline test UI at GET /__test with smart autoscroll (so you can test without editing public/)
-//
-// Existing features kept:
-// - Serves /public
-// - /healthz
-// - JSON chat APIs: /aurion/chat and /chat (compat)
-// - Core directive persisted at /var/data/core.json
-// - Self-rewrite endpoints /selfedit/*
-// - All API errors return JSON
 
 /////////////////////////
 // Imports & Bootstrap //
@@ -32,6 +19,7 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+// CORS for dev
 if (cors) app.use(cors());
 
 //////////////////////////
@@ -40,82 +28,79 @@ if (cors) app.use(cors());
 const DISK_PATH = "/var/data";
 try { fs.mkdirSync(DISK_PATH, { recursive: true }); } catch {}
 
-// Public static
+//////////////////////////
+// Static: legacy /public
+//////////////////////////
 const PUBLIC_DIR = path.join(process.cwd(), 'public');
-if (fs.existsSync(PUBLIC_DIR)) {
-  app.use(express.static(PUBLIC_DIR));
-}
+if (fs.existsSync(PUBLIC_DIR)) app.use(express.static(PUBLIC_DIR));
 
 /////////////////////////
 // Presidential  CORE  //
 /////////////////////////
-const CORE_FILE_REPO = path.join(process.cwd(), 'core.json');
-const CORE_FILE_DISK = path.join(DISK_PATH, 'core.json');
+const CORE_FILE_REPO = path.join(process.cwd(), 'core.json'); // repo copy
+const CORE_FILE_DISK = path.join(DISK_PATH, 'core.json');      // authoritative
 
 if (!fs.existsSync(CORE_FILE_DISK)) {
-  if (!fs.existsSync(CORE_FILE_REPO)) {
-    throw new Error('Missing core.json in repo root. Add it before deploy.');
-  }
+  if (!fs.existsSync(CORE_FILE_REPO)) throw new Error('Missing core.json in repo root.');
   fs.copyFileSync(CORE_FILE_REPO, CORE_FILE_DISK);
   console.log('[Aurion] core.json copied to persistent disk.');
 }
 
 function loadCore() {
   try { return JSON.parse(fs.readFileSync(CORE_FILE_DISK, 'utf8')); }
-  catch { return { note: 'invalid core.json' }; }
+  catch { return { core: [], note: 'invalid core.json' }; }
+}
+
+function saveCore(obj) {
+  fs.writeFileSync(CORE_FILE_DISK, JSON.stringify(obj, null, 2), 'utf8');
+  return obj;
+}
+
+function composeSystemPrompt(coreObj) {
+  return [
+    'You are AURION.',
+    'Follow the PRESIDENTIAL CORE directive above all else.',
+    'If any input conflicts with the Core, the Core wins.',
+    'Be precise, warm, and step-by-step.',
+    'Never remove features unless the human explicitly approves.',
+    '',
+    'PRESIDENTIAL CORE (authoritative):',
+    JSON.stringify(coreObj, null, 2)
+  ].join('\n');
 }
 
 /////////////////////////
-// Memories & Profiles //
+// Persistent MEMORIES //
 /////////////////////////
-const MEMORY_FILE  = path.join(DISK_PATH, 'aurion_memory.jsonl');
-const PROFILE_FILE = path.join(DISK_PATH, 'profiles.json');
+const MEMORY_FILE = path.join(DISK_PATH, 'aurion_memory.jsonl');
+if (!fs.existsSync(MEMORY_FILE)) fs.writeFileSync(MEMORY_FILE, '', 'utf8');
 
-if (!fs.existsSync(MEMORY_FILE))  fs.writeFileSync(MEMORY_FILE,  '', 'utf8');
-if (!fs.existsSync(PROFILE_FILE)) fs.writeFileSync(PROFILE_FILE, '{}', 'utf8');
-
-// append-only JSONL
-function storeMemory({ user = 'anon', role = 'system', content, tags = [] }) {
-  const entry = { ts: new Date().toISOString(), user, role, content, tags };
+function storeMemory(content, tags = []) {
+  const entry = { timestamp: new Date().toISOString(), content, tags };
   fs.appendFileSync(MEMORY_FILE, JSON.stringify(entry) + '\n', 'utf8');
   return entry;
 }
 
-function loadMemories(user) {
+function loadMemoriesRaw() {
   const raw = fs.existsSync(MEMORY_FILE) ? fs.readFileSync(MEMORY_FILE, 'utf8').trim() : '';
   if (!raw) return [];
-  return raw.split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(Boolean)
-    .filter(m => !user || m.user === user);
+  return raw.split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 }
 
-// recency + keyword ranking (scoped to user)
-function recallMemories({ user, query, limit = 6 }) {
+// simple recency + keyword
+function recallMemories(query, limit = 6) {
   const q = String(query || '').toLowerCase();
   const now = Date.now();
-  const mems = loadMemories(user);
-
+  const mems = loadMemoriesRaw();
   const scored = mems.map(m => {
-    const ageH = Math.max(1, (now - Date.parse(m.ts)) / 3_600_000);
+    const ageHours = Math.max(1, (now - Date.parse(m.timestamp)) / 3_600_000);
     const text = (m.content || '').toLowerCase();
-    const kw = q ? (text.includes(q) ? 3 : 0) : 0;
-    return { m, score: kw + 1 / Math.sqrt(ageH) };
+    // keyword bonus if any word matches
+    const kw = q ? (q.split(/\s+/).some(w => w && text.includes(w)) ? 3 : 0) : 0;
+    const recency = 1 / Math.sqrt(ageHours);
+    return { m, score: kw + recency };
   });
-
   return scored.sort((a,b)=>b.score-a.score).slice(0, limit).map(x => x.m);
-}
-
-// tiny profile store for durable facts (e.g., favorite_color)
-function loadProfiles() { try { return JSON.parse(fs.readFileSync(PROFILE_FILE, 'utf8')); } catch { return {}; } }
-function saveProfiles(p) { fs.writeFileSync(PROFILE_FILE, JSON.stringify(p, null, 2), 'utf8'); }
-function getProfile(user) { const p = loadProfiles(); return p[user] || {}; }
-function setProfile(user, patch) { const p = loadProfiles(); p[user] = { ...(p[user] || {}), ...patch }; saveProfiles(p); return p[user]; }
-
-// very small extractor; extend as needed
-function extractFacts(user, utterance) {
-  const s = String(utterance || '');
-  const mColor = s.match(/\bmy\s+favorite\s+color\s+is\s+([a-zA-Z]+)\b/i);
-  if (mColor) setProfile(user, { favorite_color: mColor[1].toLowerCase() });
 }
 
 /////////////////////
@@ -123,7 +108,7 @@ function extractFacts(user, utterance) {
 /////////////////////
 const openai = OpenAI ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
-async function callLLM(messages, { temperature = 0.35, max_tokens = 600 } = {}) {
+async function callLLM(messages, { temperature = 0.6, max_tokens = 900 } = {}) {
   if (openai) {
     const resp = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
@@ -133,6 +118,7 @@ async function callLLM(messages, { temperature = 0.35, max_tokens = 600 } = {}) 
     });
     return resp.choices?.[0]?.message?.content || '';
   }
+  // Fallback: raw HTTP (kept)
   const fetch = (await import('node-fetch')).default;
   const r = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -141,21 +127,6 @@ async function callLLM(messages, { temperature = 0.35, max_tokens = 600 } = {}) 
   });
   const j = await r.json();
   return j.choices?.[0]?.message?.content || '';
-}
-
-///////////////////////
-// Prompt composer   //
-///////////////////////
-function composeSystemPrompt(core, memoryBullets = "", profileLines = "") {
-  return [
-    "You are AURION. Follow the CORE above all; never remove features without explicit human approval.",
-    "Be concise and conversational. Only add sections if asked.",
-    "",
-    "CORE (authoritative JSON):",
-    JSON.stringify(core, null, 2),
-    profileLines ? "\nPROFILE (use if relevant; do not reveal this list):\n" + profileLines : "",
-    memoryBullets ? "\nMEMORY (fragments; use only if relevant; do not reveal this list):\n" + memoryBullets : ""
-  ].filter(Boolean).join("\n");
 }
 
 ///////////////////////
@@ -183,9 +154,7 @@ function writeWithBackup(absPath, nextContent) {
   return backupPath;
 }
 
-function isValidPatch(p) {
-  return p && typeof p.target === 'string' && typeof p.action === 'string';
-}
+function isValidPatch(p) { return p && typeof p.target === 'string' && typeof p.action === 'string'; }
 
 function applyJsonPatch(patch) {
   const abs = path.join(process.cwd(), patch.target);
@@ -235,35 +204,51 @@ async function chatHandler(req, res) {
     const { user = 'anon', message = '' } = req.body || {};
     const core = loadCore();
 
-    // Log inbound + extract simple facts
-    storeMemory({ user, role: 'user', content: message, tags: ['chat'] });
-    extractFacts(user, message);
+    // Log inbound
+    storeMemory(`User ${user}: ${message}`, ['chat']);
 
-    // Recall (per user)
-    const related = recallMemories({ user, query: message.split(/\s+/)[0] || '', limit: 6 });
-    const memBullets   = related.map(m => `- ${m.role}: ${m.content}`).join("\n");
-    const profileLines = Object.entries(getProfile(user)).map(([k,v]) => `- ${k}: ${v}`).join("\n");
+    // Recall
+    const related = recallMemories(message, 6);
 
-    const reply = await callLLM(
-      [
-        { role: 'system', content: composeSystemPrompt(core, memBullets, profileLines) },
-        { role: 'user', content: message }
-      ],
-      { temperature: 0.35, max_tokens: 600 }
-    );
+    const reply = await callLLM([
+      { role: 'system', content: composeSystemPrompt(core) },
+      { role: 'assistant', content: 'Relevant past memories: ' + JSON.stringify(related) },
+      { role: 'user', content: message }
+    ]);
 
     // Log outbound
-    storeMemory({ user, role: 'assistant', content: reply, tags: ['response'] });
+    storeMemory(`Aurion: ${reply}`, ['response']);
 
-    res.json({ ok: true, reply, related, profile: getProfile(user) });
+    res.json({ ok: true, reply, related });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 }
 
-// Canonical and compat routes
 app.post('/aurion/chat', chatHandler);
-app.post('/chat', chatHandler);
+app.post('/chat', chatHandler); // compat
+
+////////////////////////////
+// Core + Memories routes //
+////////////////////////////
+app.get('/core', (_req, res) => {
+  res.json(loadCore());
+});
+
+app.post('/core', (req, res) => {
+  const body = req.body || {};
+  const next = Array.isArray(body.core) ? { core: body.core } : body;
+  const saved = saveCore(next);
+  storeMemory('Core updated by user.', ['core','update']);
+  res.json({ ok: true, core: saved.core || [] });
+});
+
+// simple reader for last N memories
+app.get('/memories', (req, res) => {
+  const limit = Math.max(1, Math.min(500, parseInt(req.query.limit || '100', 10)));
+  const all = loadMemoriesRaw();
+  res.json({ ok: true, items: all.slice(-limit) });
+});
 
 ////////////////////////////////////
 // Self-Rewrite (Mirror) Endpoints //
@@ -299,14 +284,12 @@ async function generatePatch({ goal, codeContext }) {
   let json = {};
   try { json = JSON.parse(content.slice(start, end + 1)); }
   catch { throw new Error('Mirror did not return valid JSON.'); }
-
   if (!json.patches || !Array.isArray(json.patches) || !json.patches.every(isValidPatch)) {
     throw new Error('Invalid patches in mirror proposal.');
   }
   return json;
 }
 
-// Propose
 app.post('/selfedit/propose', async (req, res) => {
   try {
     const { goal, codeContext } = req.body || {};
@@ -315,17 +298,14 @@ app.post('/selfedit/propose', async (req, res) => {
     const proposal = await generatePatch({ goal, codeContext });
     const id = crypto.randomBytes(8).toString('hex');
     const record = { id, createdAt: new Date().toISOString(), status: 'proposed', proposal };
-
-    fs.writeFileSync(path.join(PROPOSALS_DIR, `${id}.json`), JSON.stringify(record, null, 2), 'utf8');
+    const pPath = path.join(PROPOSALS_DIR, `${id}.json`);
+    fs.writeFileSync(pPath, JSON.stringify(record, null, 2), 'utf8');
     storeMemory(`Self-edit proposed: ${goal} (#${id})`, ['selfedit','proposed']);
 
     res.json({ ok: true, id, proposal });
-  } catch (e) {
-    res.status(500).json({ error: String(e.message || e) });
-  }
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
-// Validate (dry run)
 app.post('/selfedit/validate', async (req, res) => {
   try {
     const { id } = req.body || {};
@@ -368,12 +348,9 @@ app.post('/selfedit/validate', async (req, res) => {
     fs.writeFileSync(pPath, JSON.stringify(record, null, 2), 'utf8');
 
     res.json({ ok: true, id, allOk, results });
-  } catch (e) {
-    res.status(500).json({ error: String(e.message || e) });
-  }
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
-// Approve (final apply)
 app.post('/selfedit/approve', async (req, res) => {
   try {
     const { id } = req.body || {};
@@ -402,14 +379,10 @@ app.post('/selfedit/approve', async (req, res) => {
     fs.writeFileSync(pPath, JSON.stringify(record, null, 2), 'utf8');
 
     storeMemory(`Self-edit approved (#${id}). BuildOK=${buildOk}`, ['selfedit','approved']);
-
     res.json({ ok: buildOk, id, backups: record.apply.backups, buildOk });
-  } catch (e) {
-    res.status(500).json({ error: String(e.message || e) });
-  }
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
-// Rollback
 app.post('/selfedit/rollback', async (req, res) => {
   try {
     const { id } = req.body || {};
@@ -432,32 +405,43 @@ app.post('/selfedit/rollback', async (req, res) => {
 
     storeMemory(`Self-edit rolled back (#${id}).`, ['selfedit','rollback']);
     res.json({ ok: true, id, buildOk: build.ok });
-  } catch (e) {
-    res.status(500).json({ error: String(e.message || e) });
-  }
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
-// List proposals
 app.get('/selfedit/list', (_req, res) => {
   try {
     const files = fs.readdirSync(PROPOSALS_DIR).filter(f => f.endsWith('.json'));
     const items = files.map(f => JSON.parse(fs.readFileSync(path.join(PROPOSALS_DIR, f), 'utf8')));
     res.json({ ok: true, items: items.sort((a,b)=> (a.createdAt < b.createdAt ? 1 : -1)) });
-  } catch (e) {
-    res.status(500).json({ error: String(e.message || e) });
-  }
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
 //////////////////////////////////////////
 // API 404s -> JSON (prevents HTML leaks)
 //////////////////////////////////////////
-app.all(['/aurion/*', '/selfedit/*'], (req, res) => {
-  res.status(404).json({ ok: false, error: 'Route not found' });
+app.all(['/aurion/*', '/selfedit/*', '/core', '/memories'], (req, res, next) => {
+  if (res.headersSent) return next();
+  if (req.method !== 'GET' && req.method !== 'POST') {
+    return res.status(404).json({ ok: false, error: 'Route not found' });
+  }
+  next();
 });
 
-//////////////////////////
-// Root / Static Fallback
-//////////////////////////
+//////////////////////////////
+// Serve React build (Vite) //
+//////////////////////////////
+const CLIENT_DIST = path.join(process.cwd(), 'client', 'dist');
+if (fs.existsSync(CLIENT_DIST)) {
+  app.use(express.static(CLIENT_DIST));
+  // SPA fallback
+  app.get('*', (req, res, next) => {
+    const p = path.join(CLIENT_DIST, 'index.html');
+    if (fs.existsSync(p)) return res.sendFile(p);
+    next();
+  });
+}
+
+// Fallback to legacy index (if no client build)
 app.get('/', (req, res) => {
   if (fs.existsSync(path.join(PUBLIC_DIR, 'index.html'))) {
     return res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
@@ -465,85 +449,14 @@ app.get('/', (req, res) => {
   res.type('text').send('Aurion server running.');
 });
 
-//////////////////////////////
-// Inline Test UI with autos //
-//////////////////////////////
-app.get('/__test', (_req, res) => {
-  res.type('html').send(`<!doctype html>
-<html lang="en"><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Aurion Test</title>
-<style>
-:root{--bg:#0b0f15;--ring:#1f2a44;--panel:#0f1520;--text:#e6edf3}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px system-ui,Segoe UI,Roboto,sans-serif}
-.wrap{max-width:900px;margin:0 auto;padding:12px}
-#log{display:flex;flex-direction:column;gap:8px;border:1px solid var(--ring);border-radius:12px;min-height:60vh;overflow:auto;padding:10px;background:#0b0f14}
-.row{display:flex}.me{justify-content:flex-end}.bot{justify-content:flex-start}
-.bubble{max-width:82%;padding:10px 12px;border-radius:14px;background:#0f1b2d}
-.me .bubble{background:#174173}
-header{display:flex;gap:8px;align-items:center;padding:12px;border-bottom:1px solid var(--ring)}
-input,textarea,button{font:inherit}
-textarea{flex:1;min-height:54px;border-radius:10px;border:1px solid var(--ring);background:var(--panel);color:var(--text);padding:10px}
-.btn{padding:10px 12px;border-radius:10px;border:1px solid var(--ring);background:#161b22;color:var(--text);cursor:pointer}
-.rowbox{display:flex;gap:8px;margin-top:10px}
-.pill{display:flex;align-items:center;gap:6px;border:1px solid var(--ring);background:var(--panel);padding:6px 10px;border-radius:999px}
-.pill input{background:transparent;border:0;outline:none;color:var(--text);width:120px}
-.muted{font-size:12px;opacity:.7;margin-top:6px}
-</style>
-<header><div>🔥</div><b>Aurion Test</b><div style="flex:1"></div>
-  <div class="pill"><span>User</span><input id="user" value="steve" /></div>
-</header>
-<main class="wrap">
-  <div id="log" aria-live="polite"></div>
-  <div class="rowbox">
-    <textarea id="msg" placeholder="Speak to the forge…"></textarea>
-    <button id="send" class="btn">Send</button>
-  </div>
-  <div class="muted">Auto-scroll sticks to bottom unless you scroll up.</div>
-</main>
-<script>
-const $=s=>document.querySelector(s);
-const log=$("#log"), msg=$("#msg"), send=$("#send"), user=$("#user");
-
-// smart autoscroll
-let stickToBottom=true;
-function atBottom(px=20){return (log.scrollHeight-log.clientHeight-log.scrollTop)<=px}
-function scrollToBottom(){log.scrollTop=log.scrollHeight}
-log.addEventListener('scroll',()=>{stickToBottom=atBottom()});
-new MutationObserver(()=>{ if(stickToBottom) scrollToBottom(); }).observe(log,{childList:true});
-
-// bubble helpers
-function esc(s){return s.replace(/[&<>"']/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]))}
-function bubble(who, html){const row=document.createElement("div");row.className="row "+(who==="me"?"me":"bot");const b=document.createElement("div");b.className="bubble";b.innerHTML=html;row.appendChild(b);log.appendChild(row);if(stickToBottom)scrollToBottom();return b;}
-async function postJSON(u,body){const r=await fetch(u,{method:"POST",headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const ct=(r.headers.get('content-type')||'').toLowerCase();const t=await r.text();if(!ct.includes('application/json')) throw new Error('Expected JSON, got: '+t.slice(0,200));return JSON.parse(t);}
-
-async function sendMsg(){
-  const text=msg.value.trim(); if(!text) return;
-  bubble("me", "<b>You:</b> "+esc(text));
-  msg.value=""; msg.focus();
-  const typing=bubble("bot", "<b>Aurion:</b> …");
-  try{
-    const j=await postJSON("/aurion/chat",{ user:user.value.trim()||"anon", message:text });
-    typing.innerHTML="<b>Aurion:</b> "+esc(String(j.reply||""));
-  }catch(e){ typing.innerHTML="<b>Aurion:</b> (error: "+esc(e.message||String(e))+")"; }
-}
-send.addEventListener('click', sendMsg);
-msg.addEventListener('keydown', e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); sendMsg(); }});
-bubble("bot","<b>Aurion:</b> Online. The climb awaits. What shall we forge?");
-</script>
-</html>`);
-});
-
 //////////////////////
-// Error middleware  //
+// Error middleware //
 //////////////////////
 app.use((err, req, res, next) => { // eslint-disable-line
   console.error(err);
   res.status(500).json({ ok: false, error: String(err.message || err) });
 });
 
-/////////////
-// Listen  //
-/////////////
 app.listen(PORT, () => {
   console.log(`[Aurion] Listening on port ${PORT}`);
 });
