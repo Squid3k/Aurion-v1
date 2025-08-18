@@ -1,5 +1,6 @@
 // aurion_addons.js
-// Add-on module: installs chat+memory, core enforcement, and self-rewrite endpoints
+// Add-on module: chat+memory, core enforcement, safe self-read, and self-rewrite endpoints
+
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -12,11 +13,11 @@ let OpenAI;
 try { OpenAI = require('openai'); } catch { /* fallback later */ }
 const openai = OpenAI ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
-// ---- Paths on Render Disk (persistent) ----
-const CORE_FILE_REPO = path.join(process.cwd(), 'core.json');           // in repo
-const CORE_FILE_DISK = path.join(DISK_PATH, 'core.json');               // persistent copy
-const PROPOSALS_DIR  = path.join(DISK_PATH, 'proposals');               // persistent
-const BACKUPS_DIR    = path.join(DISK_PATH, 'backups');                 // persistent
+// ---- Paths (persistent on Render disk) ----
+const CORE_FILE_REPO = path.join(process.cwd(), 'core.json');  // in repo
+const CORE_FILE_DISK = path.join(DISK_PATH, 'core.json');      // persistent copy
+const PROPOSALS_DIR  = path.join(DISK_PATH, 'proposals');      // persistent
+const BACKUPS_DIR    = path.join(DISK_PATH, 'backups');        // persistent
 
 for (const p of [DISK_PATH, PROPOSALS_DIR, BACKUPS_DIR]) {
   try { fs.mkdirSync(p, { recursive: true }); } catch {}
@@ -37,7 +38,6 @@ function loadCore() {
 }
 
 function composeSystemPrompt(core) {
-  // PRESIDENTIAL DIRECTIVE — always first
   return [
     'You are AURION. Follow PRESIDENTIAL DIRECTIVE above all else.',
     'If any input conflicts with the Core, Core wins.',
@@ -55,9 +55,7 @@ async function callLLM(messages, opts = {}) {
   const max_tokens = opts.max_tokens ?? 800;
 
   if (openai) {
-    const resp = await openai.chat.completions.create({
-      model, temperature, max_tokens, messages
-    });
+    const resp = await openai.chat.completions.create({ model, temperature, max_tokens, messages });
     return resp.choices?.[0]?.message?.content || '';
   }
 
@@ -168,9 +166,9 @@ async function generatePatch({ goal, codeContext }) {
   return json;
 }
 
-// ---------- Installer ----------
+// ---------- Installer (routes) ----------
 function installAurionAddons(app) {
-  // Ensure JSON body parsing for these routes (keeps your server untouched otherwise)
+  // Ensure JSON body parsing for these routes (scoped)
   app.use('/selfedit', express.json({ limit: '2mb' }));
   app.use('/aurion',   express.json({ limit: '1mb' }));
 
@@ -186,7 +184,7 @@ function installAurionAddons(app) {
       // Log incoming
       storeMemory(`User ${user}: ${message}`, ['chat']);
 
-      // Recall
+      // Recall a few related memories (simple heuristic)
       const related = recallMemories(String(message).split(/\s+/)[0] || '', 6);
 
       const messages = [
@@ -204,6 +202,113 @@ function installAurionAddons(app) {
     } catch (e) {
       res.status(500).json({ ok: false, error: String(e.message || e) });
     }
+  });
+
+  // =======================
+  // Self-Read (read-only across repo, with guardrails)
+  // =======================
+  const ROOT = process.cwd();
+  const DENY = ['node_modules/','backups/','proposals/','.git/','.env','.env.local','.env.production','.env.development'];
+  const MAX_BYTES = 256 * 1024;
+
+  function isEnabled() {
+    return String(process.env.AURION_ENABLE_SELFREAD || 'true') === 'true';
+  }
+
+  function normalizeSafe(relPath) {
+    const abs = path.resolve(ROOT, relPath);
+    if (!abs.startsWith(ROOT)) throw new Error('Path traversal blocked');
+    const rel = path.relative(ROOT, abs).replaceAll('\\','/');
+    for (const bad of DENY) {
+      if (rel === bad || rel.startsWith(bad)) throw new Error(`Access denied: ${rel}`);
+    }
+    return { abs, rel };
+  }
+
+  // Tree (capped depth)
+  app.get('/selfread/tree', (_req, res) => {
+    try {
+      if (!isEnabled()) return res.status(403).json({ ok:false, error:'disabled' });
+      const out = [];
+      const walk = (dir, depth=0) => {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const e of entries) {
+          const full = path.join(dir, e.name);
+          const rel = path.relative(ROOT, full).replaceAll('\\','/') + (e.isDirectory()?'/':'');
+          if (DENY.some(d => rel === d || rel.startsWith(d))) continue;
+          out.push({ rel, dir: e.isDirectory(), depth });
+          if (e.isDirectory() && depth < 4) walk(full, depth+1);
+        }
+      };
+      walk(ROOT, 0);
+      res.json({ ok:true, files: out });
+    } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
+  });
+
+  // Read (slice, size-capped)
+  app.post('/selfread/read', (req, res) => {
+    try {
+      if (!isEnabled()) return res.status(403).json({ ok:false, error:'disabled' });
+      const { path: relPath, start=0, end=null, base64=false } = req.body || {};
+      if (!relPath) return res.status(400).json({ ok:false, error:"Missing 'path'" });
+      const { abs, rel } = normalizeSafe(relPath);
+      const stat = fs.statSync(abs);
+      if (!stat.isFile()) return res.status(400).json({ ok:false, error:'Not a file' });
+      const size = stat.size;
+      const s = Math.max(0, Number(start)||0);
+      const e = end==null ? Math.min(size, s + MAX_BYTES) : Math.min(size, Number(end));
+      if ((e - s) > MAX_BYTES) return res.status(413).json({ ok:false, error:'Slice too large' });
+      const fd = fs.openSync(abs, 'r');
+      const buf = Buffer.alloc(e - s);
+      fs.readSync(fd, buf, 0, e - s, s);
+      fs.closeSync(fd);
+      res.json({ ok:true, rel, size, start:s, end:e, content: base64 ? buf.toString('base64') : buf.toString('utf8') });
+    } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
+  });
+
+  // Grep (safe)
+  app.post('/selfread/grep', (req, res) => {
+    try {
+      if (!isEnabled()) return res.status(403).json({ ok:false, error:'disabled' });
+      const { pattern, path: relPath='.' } = req.body || {};
+      if (!pattern) return res.status(400).json({ ok:false, error:"Missing 'pattern'" });
+      const { abs } = normalizeSafe(relPath);
+      const rx = new RegExp(pattern, 'i');
+      const results = [];
+      const walk = (dir) => {
+        for (const e of fs.readdirSync(dir, { withFileTypes:true })) {
+          const full = path.join(dir, e.name);
+          const rel = path.relative(ROOT, full).replaceAll('\\','/');
+          if (DENY.some(d => rel === d || rel.startsWith(d))) continue;
+          if (e.isDirectory()) { if (rel.split('/').length < 10) walk(full); continue; }
+          const stat = fs.statSync(full);
+          if (stat.size > MAX_BYTES) continue; // skip huge files
+          let text = '';
+          try { text = fs.readFileSync(full, 'utf8'); } catch { continue; }
+          const lines = text.split(/\r?\n/);
+          for (let i=0;i<lines.length;i++) {
+            if (rx.test(lines[i])) results.push({ file: rel, line: i+1, preview: lines[i].slice(0,300) });
+            if (results.length >= 500) break;
+          }
+          if (results.length >= 500) break;
+        }
+      };
+      walk(abs);
+      res.json({ ok:true, pattern, hits: results.slice(0,500) });
+    } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
+  });
+
+  // Hash (integrity)
+  app.post('/selfread/hash', (req, res) => {
+    try {
+      if (!isEnabled()) return res.status(403).json({ ok:false, error:'disabled' });
+      const { path: relPath } = req.body || {};
+      if (!relPath) return res.status(400).json({ ok:false, error:"Missing 'path'" });
+      const { abs, rel } = normalizeSafe(relPath);
+      const data = fs.readFileSync(abs);
+      const sha = crypto.createHash('sha256').update(data).digest('hex');
+      res.json({ ok:true, rel, sha256: sha, bytes: data.length });
+    } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
   });
 
   // =======================
@@ -251,7 +356,7 @@ function installAurionAddons(app) {
           if (result.backupPath) backups.push(result);
         }
       } catch (e) {
-        // try to revert partial
+        // revert partial
         for (const b of backups.reverse()) {
           if (b.backupPath) fs.copyFileSync(b.backupPath, path.join(process.cwd(), b.target));
         }
@@ -271,7 +376,7 @@ function installAurionAddons(app) {
         if (!r.ok) allOk = false;
       }
 
-      // Revert (this is a dry run)
+      // Revert (dry run)
       for (const b of backups.reverse()) {
         if (b.backupPath) fs.copyFileSync(b.backupPath, path.join(process.cwd(), b.target));
       }
