@@ -11,6 +11,7 @@
 //
 // New:
 // - Safe self-read: /selfread/tree, /selfread/read, /selfread/grep, /selfread/hash
+// - Convenience reader: /read-code?file=... (thin wrapper over /selfread/read)
 // - Add-on loader that reads addons/registry.json and mounts addons/*
 // - Write fence: patches may ONLY touch addons/** (and core.json if allowed)
 
@@ -566,6 +567,24 @@ app.post('/selfread/hash', (req, res) => {
     const data = fs.readFileSync(abs);
     const sha = crypto.createHash('sha256').update(data).digest('hex');
     res.json({ ok:true, rel, sha256: sha, bytes: data.length });
+  } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
+});
+
+// Convenience wrapper: /read-code?file=server.js
+app.get('/read-code', (req, res) => {
+  try {
+    if (!SELFREAD_ENABLED) return res.status(403).json({ ok:false, error:'disabled' });
+    const file = String(req.query.file || '').trim();
+    if (!file) return res.status(400).json({ ok:false, error: "Missing 'file' query param" });
+    const { abs, rel } = srNormalize(file);
+    const stat = fs.statSync(abs);
+    if (!stat.isFile()) return res.status(400).json({ ok:false, error: 'Not a file' });
+    const size = Math.min(stat.size, SELFREAD_MAX);
+    const fd = fs.openSync(abs, 'r');
+    const buf = Buffer.alloc(size);
+    fs.readSync(fd, buf, 0, size, 0);
+    fs.closeSync(fd);
+    res.json({ ok:true, rel, size: stat.size, content: buf.toString('utf8') });
   } catch (e) { res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
 
