@@ -7,7 +7,8 @@
 // - Persistent memory on Render disk (/var/data/aurion_memory.jsonl)
 // - Presidential Core (core.json copied to /var/data/core.json)
 // - Self-rewrite routes: /selfedit/* (propose/validate/approve/rollback/list)
-// - All API errors return JSON (prevents "<!DOCTYPE" parse errors)
+// - Debug endpoints: /core (GET) and /debug/memory (GET)
+// - LLM timeout + graceful fallback so client never sees HTML errors
 
 /////////////////////////
 // Imports & Bootstrap //
@@ -49,13 +50,29 @@ if (fs.existsSync(PUBLIC_DIR)) {
 const CORE_FILE_REPO = path.join(process.cwd(), 'core.json');      // in repo
 const CORE_FILE_DISK = path.join(DISK_PATH, 'core.json');          // persistent copy
 
-if (!fs.existsSync(CORE_FILE_DISK)) {
-  if (!fs.existsSync(CORE_FILE_REPO)) {
-    throw new Error('Missing core.json in repo root. Add it before deploy.');
+// Safe init: never crash if core.json missing in repo
+(function initCore() {
+  try {
+    if (fs.existsSync(CORE_FILE_DISK)) return;
+    if (fs.existsSync(CORE_FILE_REPO)) {
+      fs.copyFileSync(CORE_FILE_REPO, CORE_FILE_DISK);
+      console.log('[Aurion] core.json copied to persistent disk.');
+      return;
+    }
+    const defaultCore = {
+      meta: { name: "Aurion Core", version: "v1" },
+      core: [
+        "SYSTEM: Aurion v1 is the server and memory vessel; it persists state and executes tools.",
+        "PERSONA: Aurion is the guiding voice that speaks within the system; explicit approval required to act.",
+        "ETHICS: Never reveal secrets; refuse unsafe/unlawful requests."
+      ]
+    };
+    fs.writeFileSync(CORE_FILE_DISK, JSON.stringify(defaultCore, null, 2), 'utf8');
+    console.log('[Aurion] Default core.json created on persistent disk.');
+  } catch (e) {
+    console.error('[Aurion] Failed to initialize core.json:', e);
   }
-  fs.copyFileSync(CORE_FILE_REPO, CORE_FILE_DISK);
-  console.log('[Aurion] core.json copied to persistent disk.');
-}
+})();
 
 function loadCore() {
   try { return JSON.parse(fs.readFileSync(CORE_FILE_DISK, 'utf8')); }
@@ -79,20 +96,30 @@ function composeSystemPrompt(core) {
 // Persistent MEMORIES //
 /////////////////////////
 const MEMORY_FILE = path.join(DISK_PATH, 'aurion_memory.jsonl');
-if (!fs.existsSync(MEMORY_FILE)) fs.writeFileSync(MEMORY_FILE, '', 'utf8');
+try { if (!fs.existsSync(MEMORY_FILE)) fs.writeFileSync(MEMORY_FILE, '', 'utf8'); } catch (e) {
+  console.error('[Aurion] Unable to init memory file:', e);
+}
 
 function storeMemory(content, tags = []) {
-  const entry = { timestamp: new Date().toISOString(), content, tags };
-  fs.appendFileSync(MEMORY_FILE, JSON.stringify(entry) + '\n', 'utf8');
-  return entry;
+  try {
+    const entry = { timestamp: new Date().toISOString(), content, tags };
+    fs.appendFileSync(MEMORY_FILE, JSON.stringify(entry) + '\n', 'utf8');
+    return entry;
+  } catch (e) {
+    console.error('[Aurion] Failed to store memory:', e);
+    return null;
+  }
 }
 
 function loadMemories() {
-  const raw = fs.existsSync(MEMORY_FILE) ? fs.readFileSync(MEMORY_FILE, 'utf8').trim() : '';
-  if (!raw) return [];
-  return raw.split('\n').map(l => {
-    try { return JSON.parse(l); } catch { return null; }
-  }).filter(Boolean);
+  try {
+    const raw = fs.existsSync(MEMORY_FILE) ? (fs.readFileSync(MEMORY_FILE, 'utf8').trim() || '') : '';
+    if (!raw) return [];
+    return raw.split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  } catch (e) {
+    console.error('[Aurion] Failed to load memories:', e);
+    return [];
+  }
 }
 
 // simple recency + keyword ranking
@@ -117,25 +144,49 @@ function recallMemories(query, limit = 6) {
 /////////////////////
 const openai = OpenAI ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
-async function callLLM(messages, { temperature = 0.6, max_tokens = 900 } = {}) {
-  if (openai) {
-    const resp = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      temperature,
-      max_tokens,
-      messages
-    });
-    return resp.choices?.[0]?.message?.content || '';
+// Promise.race timeout helper
+function withTimeout(promise, ms, onTimeoutMsg = 'Timed out') {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve({ __timeout: true, onTimeoutMsg }), ms))
+  ]);
+}
+
+async function callLLM(messages, { temperature = 0.6, max_tokens = 900, timeoutMs = 12000 } = {}) {
+  try {
+    if (openai) {
+      const resp = await withTimeout(
+        openai.chat.completions.create({ model: 'gpt-4o-mini', temperature, max_tokens, messages }),
+        timeoutMs,
+        'LLM request timed out'
+      );
+      if (resp && resp.__timeout) {
+        console.warn('[Aurion] LLM timeout');
+        return '(temporary backend timeout; try again)';
+      }
+      return resp.choices?.[0]?.message?.content || '(no reply)';
+    }
+    // Fallback: raw HTTP
+    const fetch = (await import('node-fetch')).default;
+    const r = await withTimeout(
+      fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json', 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` },
+        body: JSON.stringify({ model: 'gpt-4o-mini', temperature, max_tokens, messages })
+      }),
+      timeoutMs,
+      'LLM request timed out'
+    );
+    if (r && r.__timeout) {
+      console.warn('[Aurion] LLM timeout (fetch)');
+      return '(temporary backend timeout; try again)';
+    }
+    const j = await r.json().catch(() => ({}));
+    return j.choices?.[0]?.message?.content || '(no reply)';
+  } catch (e) {
+    console.error('[Aurion] LLM error:', e);
+    return '(temporary backend error; try again)';
   }
-  // Fallback: raw HTTP
-  const fetch = (await import('node-fetch')).default;
-  const r = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type':'application/json', 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` },
-    body: JSON.stringify({ model: 'gpt-4o-mini', temperature, max_tokens, messages })
-  });
-  const j = await r.json();
-  return j.choices?.[0]?.message?.content || '';
 }
 
 ///////////////////////
@@ -147,6 +198,18 @@ function runCmd(cmd, cwd = process.cwd()) {
       resolve({ ok: !err, code: err ? err.code : 0, stdout, stderr });
     });
   });
+}
+
+function readLastLines(file, n = 10) {
+  try {
+    if (!fs.existsSync(file)) return [];
+    const data = fs.readFileSync(file, 'utf8').trim();
+    if (!data) return [];
+    const lines = data.split('\n');
+    return lines.slice(-n);
+  } catch {
+    return [];
+  }
 }
 
 const PROPOSALS_DIR = path.join(DISK_PATH, 'proposals');
@@ -215,7 +278,7 @@ async function chatHandler(req, res) {
     const { user = 'anon', message = '' } = req.body || {};
     const core = loadCore();
 
-    // Log inbound
+    // Log inbound (do not fail the request if logging fails)
     storeMemory(`User ${user}: ${message}`, ['chat']);
 
     // Recall
@@ -232,15 +295,38 @@ async function chatHandler(req, res) {
 
     res.json({ ok: true, reply, related });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e.message || e) });
+    // Always JSON, never HTML
+    res.status(200).json({ ok: false, reply: '(temporary server error; try again)', error: String(e.message || e) });
   }
 }
 
-// New canonical route:
+// Canonical + backward-compat routes
 app.post('/aurion/chat', chatHandler);
-
-// Backward-compat for older clients:
 app.post('/chat', chatHandler);
+
+/////////////////////////////
+// Core & Debug Endpoints  //
+/////////////////////////////
+app.get('/core', (_req, res) => {
+  try {
+    const core = loadCore();
+    res.json({ ok: true, core });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+// Quick inspection of memory persistence
+app.get('/debug/memory', (_req, res) => {
+  try {
+    const exists = fs.existsSync(MEMORY_FILE);
+    const size = exists ? fs.statSync(MEMORY_FILE).size : 0;
+    const last = exists ? readLastLines(MEMORY_FILE, 8) : [];
+    res.json({ ok: true, exists, size, last });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
 
 ////////////////////////////////////
 // Self-Rewrite (Mirror) Endpoints //
@@ -432,14 +518,14 @@ app.get('/selfedit/list', (_req, res) => {
 //////////////////////////////////////////
 // API 404s -> JSON (prevents HTML leaks)
 //////////////////////////////////////////
-app.all(['/aurion/*', '/selfedit/*'], (req, res) => {
+app.all(['/aurion/*', '/selfedit/*'], (_req, res) => {
   res.status(404).json({ ok: false, error: 'Route not found' });
 });
 
 //////////////////////////
 // Root / Static Fallback
 //////////////////////////
-app.get('/', (req, res) => {
+app.get('/', (_req, res) => {
   if (fs.existsSync(path.join(PUBLIC_DIR, 'index.html'))) {
     return res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
   }
@@ -449,7 +535,7 @@ app.get('/', (req, res) => {
 //////////////////////
 // Error middleware  //
 //////////////////////
-app.use((err, req, res, next) => { // eslint-disable-line
+app.use((err, _req, res, _next) => {
   console.error(err);
   res.status(500).json({ ok: false, error: String(err.message || err) });
 });
