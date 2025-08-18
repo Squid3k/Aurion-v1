@@ -1,19 +1,18 @@
-// server.js — Aurion v1 (additive, safe, persistent) + FACT RECALL
+// server.js — Aurion v1 (additive, safe, persistent, with TRUE RECALL)
 //
-// Features kept from your build:
-// - Serves /public
+// Kept features:
+// - Serves /public as static site (SPA friendly)
 // - /healthz
-// - /aurion/chat  (JSON API)  + /chat (compat)
+// - /aurion/chat (JSON API) + backward-compatible /chat
 // - Persistent memory on Render disk (/var/data/aurion_memory.jsonl)
-// - Presidential Core (core.json copied to /var/data/core.json)
-// - Self-rewrite routes: /selfedit/*
-// - All API errors return JSON
+// - Self-rewrite routes: /selfedit/* (propose/validate/approve/rollback/list)
+// - All API errors return JSON (prevents "<!DOCTYPE" parse errors)
 //
 // New (additive):
-// - Lightweight facts store at /var/data/facts.json
-// - Auto-detect "teach" statements (e.g., “my favorite color is blue”) → saved
-// - Auto-detect recall questions (e.g., “what’s my favorite color?”) → answered from facts
-// - Optional GET/POST /facts to view/update facts
+// - Per-user transcripts at /var/data/transcripts.jsonl
+// - Chat recall: last N turns injected into model context every request
+// - Core UI endpoints: /core (GET/POST) backed by persistent /var/data/core.json
+// - Mild natural-response nudge in system prompt (no rigid sections unless asked)
 
 /////////////////////////
 // Imports & Bootstrap //
@@ -33,6 +32,8 @@ const PORT = process.env.PORT || 3000;
 // Body parsers (JSON only for APIs)
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+// CORS (allowed if package exists)
 if (cors) app.use(cors());
 
 //////////////////////////
@@ -41,15 +42,17 @@ if (cors) app.use(cors());
 const DISK_PATH = "/var/data";
 try { fs.mkdirSync(DISK_PATH, { recursive: true }); } catch {}
 
-// Public static
+// Public static (kept)
 const PUBLIC_DIR = path.join(process.cwd(), 'public');
-if (fs.existsSync(PUBLIC_DIR)) app.use(express.static(PUBLIC_DIR));
+if (fs.existsSync(PUBLIC_DIR)) {
+  app.use(express.static(PUBLIC_DIR));
+}
 
 /////////////////////////
 // Presidential  CORE  //
 /////////////////////////
-const CORE_FILE_REPO = path.join(process.cwd(), 'core.json');
-const CORE_FILE_DISK = path.join(DISK_PATH, 'core.json');
+const CORE_FILE_REPO = path.join(process.cwd(), 'core.json');      // in repo
+const CORE_FILE_DISK = path.join(DISK_PATH, 'core.json');          // persistent copy
 
 if (!fs.existsSync(CORE_FILE_DISK)) {
   if (!fs.existsSync(CORE_FILE_REPO)) {
@@ -58,20 +61,43 @@ if (!fs.existsSync(CORE_FILE_DISK)) {
   fs.copyFileSync(CORE_FILE_REPO, CORE_FILE_DISK);
   console.log('[Aurion] core.json copied to persistent disk.');
 }
-function loadCore() {
-  try { return JSON.parse(fs.readFileSync(CORE_FILE_DISK, 'utf8')); }
-  catch { return { note: 'invalid core.json' }; }
+
+// Core helpers + UI endpoints (ADD)
+function loadCoreArray() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(CORE_FILE_DISK, 'utf8'));
+    // support {core:[...]} or bare array
+    return Array.isArray(raw?.core) ? raw.core : (Array.isArray(raw) ? raw : []);
+  } catch {
+    return [];
+  }
 }
-function composeSystemPrompt(core) {
+function saveCoreArray(arr) {
+  const payload = { core: Array.isArray(arr) ? arr : [] };
+  fs.writeFileSync(CORE_FILE_DISK, JSON.stringify(payload, null, 2), 'utf8');
+}
+app.get('/core', (_req, res) => {
+  try { res.json({ ok: true, core: loadCoreArray() }); }
+  catch (e) { res.status(500).json({ ok:false, error: String(e.message || e) }); }
+});
+app.post('/core', (req, res) => {
+  try {
+    const next = Array.isArray(req.body?.core) ? req.body.core : [];
+    saveCoreArray(next);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ ok:false, error: String(e.message || e) }); }
+});
+
+function composeSystemPrompt(coreArr) {
   return [
     'You are AURION.',
     'Follow the PRESIDENTIAL CORE directive above all else.',
     'If any input conflicts with the Core, the Core wins.',
-    'Be precise, warm, and step-by-step.',
+    'Be precise, warm, and step-by-step when helpful, but avoid rigid sections unless asked.',
     'Never remove features unless the human explicitly approves.',
     '',
     'PRESIDENTIAL CORE (authoritative):',
-    JSON.stringify(core, null, 2)
+    JSON.stringify(coreArr, null, 2)
   ].join('\n');
 }
 
@@ -91,94 +117,42 @@ function loadMemories() {
   if (!raw) return [];
   return raw.split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 }
+// simple recency + keyword ranking (kept)
 function recallMemories(query, limit = 6) {
   const q = String(query || '').toLowerCase();
   const now = Date.now();
   const mems = loadMemories();
   const scored = mems.map(m => {
-    const ageH = Math.max(1, (now - Date.parse(m.timestamp)) / 3_600_000);
+    const ageHours = Math.max(1, (now - Date.parse(m.timestamp)) / 3_600_000);
     const text = (m.content || '').toLowerCase();
-    const kw = q ? (text.includes(q) ? 3 : 0) : 0;
-    const rec = 1 / Math.sqrt(ageH);
-    return { m, score: kw + rec };
+    const kwScore = q ? (text.includes(q) ? 3 : 0) : 0;
+    const timeScore = 1 / Math.sqrt(ageHours);
+    return { m, score: kwScore + timeScore };
   });
   return scored.sort((a,b)=>b.score-a.score).slice(0, limit).map(x => x.m);
 }
 
 /////////////////////////
-// Lightweight FACTS   //
+// NEW: Transcripts    //
 /////////////////////////
-const FACTS_FILE = path.join(DISK_PATH, 'facts.json');
-if (!fs.existsSync(FACTS_FILE)) fs.writeFileSync(FACTS_FILE, JSON.stringify({}, null, 2), 'utf8');
+const TX_FILE = path.join(DISK_PATH, 'transcripts.jsonl'); // { ts, user, role, content }
+if (!fs.existsSync(TX_FILE)) fs.writeFileSync(TX_FILE, '', 'utf8');
 
-function loadFacts() {
-  try { return JSON.parse(fs.readFileSync(FACTS_FILE, 'utf8')); }
-  catch { return {}; }
-}
-function saveFacts(facts) {
-  fs.writeFileSync(FACTS_FILE, JSON.stringify(facts, null, 2), 'utf8');
-}
-function setFact(key, value) {
-  const facts = loadFacts();
-  facts[key] = value;
-  saveFacts(facts);
-  return { key, value };
-}
-function getFact(key) {
-  const facts = loadFacts();
-  return facts[key];
+function appendTranscript(user, role, content) {
+  const row = { ts: Date.now(), user: String(user || 'anon'), role, content: String(content || '') };
+  fs.appendFileSync(TX_FILE, JSON.stringify(row) + '\n', 'utf8');
+  return row;
 }
 
-// Canonical keys we care about (you can add more anytime).
-const FACT_ALIASES = {
-  favorite_color: ['favorite color', 'favourite colour', 'fav color', 'fav colour', 'color'],
-  creator: ['creator', 'who created you', 'made you'],
-  inception_date: ['inception date', 'forged date', 'date of forging', 'birthday', 'birth date'],
-  name: ['my name', 'user name']
-};
-
-// Simple detectors (fast, robust enough for v1).
-function detectTeach(message) {
-  // e.g., "my favorite color is blue", "favourite colour is red", "my name is Steve"
-  const m1 = /(?:my\s+)?(favorite color|favourite colour|fav(?:ou)?rite colour|fav(?:ou)?rite color|fav color|fav colour|name)\s+is\s+([a-z0-9 \-_'"]{1,40})/i.exec(message);
-  if (m1) {
-    const rawKey = m1[1].toLowerCase().replace(/\s+/g, ' ').trim();
-    const value = m1[2].trim().replace(/^["']|["']$/g,'');
-    let key = null;
-    if (rawKey.includes('name')) key = 'name';
-    else key = 'favorite_color';
-    return { key, value };
-  }
-
-  // "You were created by Steve" / "Your creator is Steve"
-  const m2 = /(?:your|ur)\s+creator\s+(?:is|=)\s+([a-z0-9 \-_'"]{1,60})/i.exec(message);
-  if (m2) return { key: 'creator', value: m2[1].trim().replace(/^["']|["']$/g,'') };
-
-  // "You were forged on Aug 15, 2025" / "Your inception date is 2025-08-15"
-  const m3 = /(?:your|ur)\s+(?:inception date|forged (?:on)?|date of forging|birthday)\s+(?:is|=|on)\s+([a-z0-9 ,\-\/]{3,40})/i.exec(message);
-  if (m3) return { key: 'inception_date', value: m3[1].trim() };
-
-  return null;
+function loadTranscriptAll() {
+  const raw = fs.existsSync(TX_FILE) ? fs.readFileSync(TX_FILE, 'utf8').trim() : '';
+  if (!raw) return [];
+  return raw.split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 }
 
-function detectRecall(message) {
-  // e.g., "what's my favorite color", "what is my name", "who created you"
-  const lower = message.toLowerCase();
-
-  if (/(what'?s|what is)\s+my\s+(favorite color|favourite colour|fav color|fav colour|name)\b/.test(lower)) {
-    if (lower.includes('name')) return { key: 'name' };
-    return { key: 'favorite_color' };
-  }
-
-  if (/(who\s+created\s+you|who\s+made\s+you|who\s+is\s+your\s+creator)/.test(lower)) {
-    return { key: 'creator' };
-  }
-
-  if (/(when|what\s+is)\s+(?:were\s+you\s+)?(?:forged|your\s+inception\s+date|your\s+birthday)/.test(lower)) {
-    return { key: 'inception_date' };
-  }
-
-  return null;
+function lastTurnsForUser(user, n = 10) {
+  const all = loadTranscriptAll().filter(x => x.user === user);
+  return all.slice(-n);
 }
 
 /////////////////////
@@ -187,23 +161,32 @@ function detectRecall(message) {
 const openai = OpenAI ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
 async function callLLM(messages, { temperature = 0.6, max_tokens = 900 } = {}) {
-  if (openai) {
-    const resp = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      temperature,
-      max_tokens,
-      messages
+  // Timeout guard to reduce Render 502 HTML leaks
+  const TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 12000);
+  const timeout = new Promise((_, rej) => setTimeout(()=>rej(new Error('LLM timeout')), TIMEOUT_MS));
+
+  async function invoke() {
+    if (openai) {
+      const resp = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        temperature,
+        max_tokens,
+        messages
+      });
+      return resp.choices?.[0]?.message?.content || '';
+    }
+    // Fallback: raw HTTP
+    const fetch = (await import('node-fetch')).default;
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json', 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` },
+      body: JSON.stringify({ model: 'gpt-4o-mini', temperature, max_tokens, messages })
     });
-    return resp.choices?.[0]?.message?.content || '';
+    const j = await r.json();
+    return j.choices?.[0]?.message?.content || '';
   }
-  const fetch = (await import('node-fetch')).default;
-  const r = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type':'application/json', 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` },
-    body: JSON.stringify({ model: 'gpt-4o-mini', temperature, max_tokens, messages })
-  });
-  const j = await r.json();
-  return j.choices?.[0]?.message?.content || '';
+
+  return Promise.race([invoke(), timeout]);
 }
 
 ///////////////////////
@@ -230,7 +213,11 @@ function writeWithBackup(absPath, nextContent) {
   fs.writeFileSync(absPath, nextContent, 'utf8');
   return backupPath;
 }
-function isValidPatch(p) { return p && typeof p.target === 'string' && typeof p.action === 'string'; }
+
+function isValidPatch(p) {
+  return p && typeof p.target === 'string' && typeof p.action === 'string';
+}
+
 function applyJsonPatch(patch) {
   const abs = path.join(process.cwd(), patch.target);
 
@@ -240,6 +227,7 @@ function applyJsonPatch(patch) {
     fs.writeFileSync(abs, patch.snippet || '', 'utf8');
     return { backupPath: null, target: patch.target };
   }
+
   if (!fs.existsSync(abs)) throw new Error(`File not found: ${patch.target}`);
   const current = fs.readFileSync(abs, 'utf8');
   let next = current;
@@ -271,75 +259,43 @@ function applyJsonPatch(patch) {
 app.get('/healthz', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
 /////////////////////////////
-// Facts convenience routes//
-/////////////////////////////
-app.get('/facts', (_req, res) => {
-  try { res.json({ ok: true, facts: loadFacts() }); }
-  catch (e) { res.status(500).json({ ok:false, error: String(e.message || e) }); }
-});
-app.post('/facts', (req, res) => {
-  try {
-    const { key, value } = req.body || {};
-    if (!key || typeof value === 'undefined') return res.status(400).json({ ok:false, error:'key and value required' });
-    setFact(String(key), value);
-    res.json({ ok:true, key, value });
-  } catch (e) { res.status(500).json({ ok:false, error: String(e.message || e) }); }
-});
-
-/////////////////////////////
 // Chat Handler (JSON API) //
 /////////////////////////////
 async function chatHandler(req, res) {
   try {
     const { user = 'anon', message = '' } = req.body || {};
-    const msg = String(message || '').trim();
-    const core = loadCore();
+    const who = String(user || 'anon').slice(0, 64);
+    const msg = String(message || '').slice(0, 8000);
 
-    // Log inbound
-    storeMemory(`User ${user}: ${msg}`, ['chat']);
+    if (!msg) return res.status(400).json({ ok:false, error:'Missing "message".' });
 
-    // 1) Teach detection → persist to facts
-    const teach = detectTeach(msg);
-    if (teach && teach.key) {
-      const saved = setFact(teach.key, teach.value);
-      storeMemory(`Fact saved: ${saved.key} = ${saved.value}`, ['facts','teach']);
-      return res.json({
-        ok: true,
-        reply: `Got it, ${user}. I saved ${saved.key.replace('_',' ')} as "${saved.value}".`,
-        learned: saved,
-        related: recallMemories(saved.key, 4)
-      });
-    }
+    const coreArr = loadCoreArray();
 
-    // 2) Recall detection → answer from facts if present
-    const ask = detectRecall(msg);
-    if (ask && ask.key) {
-      const val = getFact(ask.key);
-      if (typeof val !== 'undefined') {
-        const txt = (ask.key === 'creator')
-          ? `I was created by ${val}.`
-          : (ask.key === 'inception_date')
-          ? `I was forged on ${val}.`
-          : (ask.key === 'name')
-          ? `Your name is ${val}.`
-          : `Your ${ask.key.replace('_',' ')} is ${val}.`;
-        storeMemory(`Aurion (fact): ${txt}`, ['facts','response']);
-        return res.json({ ok:true, reply: txt, source: 'facts', related: recallMemories(ask.key, 4) });
-      }
-      // fall through to LLM if not found
-    }
+    // Log inbound to transcripts + rolling memory
+    appendTranscript(who, 'user', msg);
+    storeMemory(`User ${who}: ${msg}`, ['chat']);
 
-    // 3) Normal LLM flow, with a small facts snapshot for extra context
-    const facts = loadFacts();
+    // Recall: gather the last N turns for this user (role-preserving)
+    const turns = lastTurnsForUser(who, 10)
+      // We just appended the current user message; exclude it from context
+      .slice(0, -1)
+      .map(t => ({ role: t.role, content: t.content }));
+
+    // Lightweight related "memory hits" (kept from your original code)
     const related = recallMemories(msg.split(/\s+/)[0] || '', 6);
-    const reply = await callLLM([
-      { role: 'system', content: composeSystemPrompt(core) },
-      { role: 'assistant', content: 'Known facts (key→value): ' + JSON.stringify(facts) },
+
+    const messages = [
+      { role: 'system', content: composeSystemPrompt(coreArr) },
+      // inject recent role-annotated turns
+      ...turns,
       { role: 'assistant', content: 'Relevant past memories: ' + JSON.stringify(related) },
       { role: 'user', content: msg }
-    ]);
+    ];
+
+    const reply = await callLLM(messages, { temperature: 0.6, max_tokens: 900 });
 
     // Log outbound
+    appendTranscript(who, 'assistant', reply);
     storeMemory(`Aurion: ${reply}`, ['response']);
 
     res.json({ ok: true, reply, related });
@@ -350,6 +306,7 @@ async function chatHandler(req, res) {
 
 // New canonical route:
 app.post('/aurion/chat', chatHandler);
+
 // Backward-compat for older clients:
 app.post('/chat', chatHandler);
 
@@ -357,8 +314,8 @@ app.post('/chat', chatHandler);
 // Self-Rewrite (Mirror) Endpoints //
 ////////////////////////////////////
 async function generatePatch({ goal, codeContext }) {
-  const core = loadCore();
-  const sys = composeSystemPrompt(core) + [
+  const coreArr = loadCoreArray();
+  const sys = composeSystemPrompt(coreArr) + [
     '',
     'You output ONLY a JSON object with keys:',
     '{ goal, rationale, patches[], tests[], risk, revert }',
@@ -382,6 +339,7 @@ async function generatePatch({ goal, codeContext }) {
     { role: 'user', content: user }
   ], { temperature: 0.3, max_tokens: 1200 });
 
+  // Extract JSON
   const start = content.indexOf('{');
   const end = content.lastIndexOf('}');
   let json = {};
@@ -429,12 +387,14 @@ app.post('/selfedit/validate', async (req, res) => {
         if (result.backupPath) backups.push(result);
       }
     } catch (e) {
+      // revert any partials
       for (const b of backups.reverse()) {
         if (b.backupPath) fs.copyFileSync(b.backupPath, path.join(process.cwd(), b.target));
       }
       return res.status(422).json({ error: 'Patch failed to apply', detail: String(e.message || e) });
     }
 
+    // validations
     const steps = record.proposal.tests && record.proposal.tests.length
       ? record.proposal.tests
       : [{ cmd: 'npm run build', description: 'Build should pass' }];
@@ -447,6 +407,7 @@ app.post('/selfedit/validate', async (req, res) => {
       if (!r.ok) allOk = false;
     }
 
+    // revert (dry run)
     for (const b of backups.reverse()) {
       if (b.backupPath) fs.copyFileSync(b.backupPath, path.join(process.cwd(), b.target));
     }
@@ -454,6 +415,7 @@ app.post('/selfedit/validate', async (req, res) => {
     record.status = allOk ? 'validated' : 'failed_validation';
     record.validation = { allOk, results, ranAt: new Date().toISOString() };
     fs.writeFileSync(pPath, JSON.stringify(record, null, 2), 'utf8');
+
     res.json({ ok: true, id, allOk, results });
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });
@@ -524,12 +486,27 @@ app.post('/selfedit/rollback', async (req, res) => {
   }
 });
 
-// API 404s -> JSON
-app.all(['/aurion/*', '/selfedit/*'], (req, res) => {
+// List proposals
+app.get('/selfedit/list', (_req, res) => {
+  try {
+    const files = fs.readdirSync(PROPOSALS_DIR).filter(f => f.endsWith('.json'));
+    const items = files.map(f => JSON.parse(fs.readFileSync(path.join(PROPOSALS_DIR, f), 'utf8')));
+    res.json({ ok: true, items: items.sort((a,b)=> (a.createdAt < b.createdAt ? 1 : -1)) });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+//////////////////////////////////////////
+// API 404s -> JSON (prevents HTML leaks)
+//////////////////////////////////////////
+app.all(['/aurion/*', '/selfedit/*', '/core*'], (req, res) => {
   res.status(404).json({ ok: false, error: 'Route not found' });
 });
 
+//////////////////////////
 // Root / Static Fallback
+//////////////////////////
 app.get('/', (req, res) => {
   if (fs.existsSync(path.join(PUBLIC_DIR, 'index.html'))) {
     return res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
@@ -537,13 +514,17 @@ app.get('/', (req, res) => {
   res.type('text').send('Aurion server running.');
 });
 
-// Error middleware
+//////////////////////
+// Error middleware  //
+//////////////////////
 app.use((err, req, res, next) => { // eslint-disable-line
   console.error(err);
   res.status(500).json({ ok: false, error: String(err.message || err) });
 });
 
-// Listen
+/////////////
+// Listen  //
+/////////////
 app.listen(PORT, () => {
   console.log(`[Aurion] Listening on port ${PORT}`);
 });
