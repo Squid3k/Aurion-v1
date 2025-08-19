@@ -1,12 +1,6 @@
-[
-  {
-    "name": "hello-world",
-    "entry": "hello-world.js",
-    "version": "1.0.0"
-  },
-  {
-    "name": "file-read",
-    "entry": "fileRead.js",
-    "version": "1.0.0"
-  }
-]
+{
+  "addons": [
+    { "file": "hello-world.js", "enabled": true },
+    { "file": "fileReader.js",  "enabled": true }
+  ]
+}
