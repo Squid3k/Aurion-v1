@@ -1,4 +1,4 @@
-// server.js — Aurion v1 (memory-integrated + file-read triggers + addons + self-edit + SEMANTIC MEMORY)
+require("dotenv").config();// server.js — Aurion v1 (memory-integrated + file-read triggers + addons + self-edit + SEMANTIC MEMORY)
 // ==================================================================================
 // Kept:
 // - Static /public
