@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "build": "npm --prefix client ci && npm --prefix client run build"
+    "build": "echo \"no build step\""
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -18,3 +18,4 @@
     "node": "20.x"
   }
 }
+```0
