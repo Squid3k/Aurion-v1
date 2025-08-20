@@ -1,6 +1,6 @@
 {
   "addons": [
     { "file": "hello-world.js", "enabled": true },
-    { "file": "fileReader.js",  "enabled": true }
+    { "file": "fileRead.js",  "enabled": true }
   ]
 }
