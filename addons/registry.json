@@ -1,6 +1,7 @@
 {
   "addons": [
     { "file": "hello-world.js", "enabled": true },
-    { "file": "fileReader.js",  "enabled": true }
+    { "file": "fileReader.js",  "enabled": true },
+    { "file": "reason-core.js", "enabled": true }
   ]
 }
